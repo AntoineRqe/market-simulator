@@ -7,11 +7,8 @@ For now, the simulator runs on a personal computer and is accessible from intern
 
 ## Project Status
 
-
-
 - Active Rust-based market simulator for order entry, matching, execution reporting, and market data distribution.
 - Currently runs two separate market processes: NASDAQ and NYSE.
-- Each market currently trades one instrument: `AAPL`.
 - Supports FIX connectivity, WebSocket/web access, PostgreSQL persistence, and UDP multicast distribution.
 - Player Service (gRPC microservice on port 50052) handles all authentication and player state
 - Cryptographic token generation using OsRng
@@ -31,7 +28,24 @@ For now, the simulator runs on a personal computer and is accessible from intern
 ### Persistence
 
 - PostgreSQL database for order events, trades, and pending orders.
+- Idempotency key management for reliable order processing and replay.
 
+### Authentication & Player State
+
+- Player service with gRPC API for authentication, portfolio management, and trade execution.
+- Cryptographic token generation for secure authentication.
+- Visitor counting and session tracking.
+
+### Monitoring & Metrics
+
+- Prometheus metrics endpoint for performance and operational monitoring.
+- Metrics include login attempts, order events, trades, latency histograms, and more.
+- WebSocket latency and connection metrics.
+
+### Order population
+
+- Fetch live price for a symbol (e.g., AAPL) from a public API (e.g., Alpha Vantage).
+- Populate the order book with synthetic orders around the live price to create a realistic market environment.
 
 ## Architecture
 
@@ -40,21 +54,24 @@ For now, the simulator runs on a personal computer and is accessible from intern
 │                     CLIENT LAYER                                │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  FIX Clients                Browser (WebSocket)                 │
+│  FIX Clients                Browser (Web / WebSocket)           │
 │       |                              |                          │
 │       |                              |                          │
-│       |  TCP:5000                    |  HTTP:9860               │
+│       |  TCP:5000 (market runtime)   |  HTTP:9860 (gateway)     │
 │       |                              |                          │
 │       +-----────────────┬────────────┤                          │
 │                         |            |                          │
 └─────────────────────────┼────────────┼──────────────────────────┘
                           v            v
 ┌──────────────────────────────────────────────────────────────────┐
-│              WEB SERVER (crates/web) - NASDAQ/NYSE               │
+│        GATEWAY + MARKET WEB LAYER (Docker services)              │
 │                                                                  │
-│  HTTP/WebSocket:                                                 │
-│  ├─ POST /api/login (authenticate_or_register via gRPC)          │
-│  └─ WebSocket /ws?token=X&username=alice&market=NASDAQ           │
+│  Gateway (port 9860):                                            │
+│  ├─ POST /api/login (JWT auth via players-service gRPC)          │
+│  └─ Routes browser to market UIs (NASDAQ/NYSE)                   │
+│                                                                  │
+│  Market Web (19870 NASDAQ / 19885 NYSE):                         │
+│  └─ WebSocket /ws?token=X&username=alice&market=...              │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │         gRPC PlayerClient (Connection Pool)                │  │
@@ -67,7 +84,7 @@ For now, the simulator runs on a personal computer and is accessible from intern
 │                         │ gRPC (HTTP/2)                          │
 │                         v                                        │
 │                                                                  │
-│  TCP Server (Port 5000):                                         │
+│  TCP Server (Port 5000, market runtime):                         │
 │  ├─ Accepts FIX clients                                          │
 │  └─ Routes to FIX Inbound Engine                                 │
 │                                                                  │
@@ -79,7 +96,7 @@ For now, the simulator runs on a personal computer and is accessible from intern
     v              v      v
 ┌─────────────────────────────────────────────────────────────────┐
 │          PLAYER SERVICE (crates/web/players)                    │
-│                  (Port 50052 - gRPC)                            │
+│                  (Port 50053 - gRPC)                            │
 │                                                                 │
 │  Core Responsibilities:                                         │
 │  ├─ User authentication & token generation (cryptographic)      │
@@ -121,7 +138,7 @@ For now, the simulator runs on a personal computer and is accessible from intern
 │  ┌──────────────────────────────────────────────────────┐        │
 │  │ Exec Report Engine (crates/execution-report)         │        │
 │  │ - Builds execution reports                           │        │
-│  │ - Routes to Player Service & FIX clients             │        │
+│  │ - Routes to players-service & FIX clients            │        │
 │  └──────────────────────────────────────────────────────┘        │
 │       │ er_to_fix (custom SPSC)                                  │
 │       v                                                          │
@@ -131,11 +148,11 @@ For now, the simulator runs on a personal computer and is accessible from intern
 │  └──────────────────────────────────────────────────────┘        │
 │       │                                                          │
 │       └─> TCP Server → FIX Clients                               │
-│       └─> Web Server (crates/web) → WebSocket clients            │
+│       └─> Market Web Layer → WebSocket clients                   │
 │                                                                  │
 └──────────────────────────────────────────────────────────────────┘
 
-ADMIN / CONTROL FLOW (gRPC from Web Server)
+ADMIN / CONTROL FLOW (gRPC from Gateway / Market Web)
 ┌─────────────────────────────────────────────────────────────────┐
 │ Player Service (gRPC)                                           │
 │ ├─ reset_all_tokens() ─────────→ Reset all player balances      │
@@ -146,67 +163,8 @@ ADMIN / CONTROL FLOW (gRPC from Web Server)
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-Technical choices and discussion about the architecture and design of the simulator can be found here [Architecture and Design](./papers/market-simulator.md).
+Technical choices and discussion about the architecture and design of the simulator can be found here [Architecture and Design](./papers/architecture.md).
 
-## Workflow: Login → WebSocket Connection
-
-The following diagram shows how a user logs in and establishes a WebSocket connection to a market:
-
-```
-BROWSER                          WEB SERVER                      PLAYER SERVICE
-   │                                  │                                 │
-   │  1. POST /api/login              │                                 │
-   │     {username, password}         │                                 │
-   ├─────────────────────────────────>│                                 │
-   │                                  │  2. gRPC: authenticate_or_register
-   │                                  ├────────────────────────────────>│
-   │                                  │  3. Validate credentials        │
-   │                                  │     Generate cryptographic token│
-   │                                  │  4. gRPC Response               │
-   │                                  │     {token, username, is_admin} │
-   │                                  │<────────────────────────────────┤
-   │  5. HTTP Response                │                                 │
-   │     {token, username, is_admin}  │                                 │
-   │<─────────────────────────────────┤                                 │
-   │                                  │                                 │
-   │  6. Store in sessionStorage:     │                                 │
-   │     - auth_token                 │                                 │
-   │     - username                   │                                 │
-   │     - is_admin                   │                                 │
-   │                                  │                                 │
-   │  7. WebSocket: ws://market:9860/ │                                 │
-   │     ws?token=X&username=alice    │                                 │
-   │     &market=NASDAQ               │                                 │
-   ├─────────────────────────────────>│                                 │
-   │                                  │  8. gRPC: Implicit token        │
-   │                                  │     validation on player methods│
-   │                                  ├────────────────────────────────>│
-   │                                  │  9. Player state loaded         │
-   │                                  │<────────────────────────────────┤
-   │  10. WebSocket Connected         │                                 │
-   │      Ready for orders & updates  │                                 │
-   │<─────────────────────────────────┤                                 │
-   │                                  │                                 │
-   │  11. Place Order                 │                                 │
-   │      {symbol, qty, price, side}  │                                 │
-   ├─────────────────────────────────>│                                 │
-   │                                  │  12. gRPC: add_trade()          │
-   │                                  ├────────────────────────────────>│
-   │                                  │  13. Update portfolio & balance │
-   │                                  │<────────────────────────────────┤
-   │  14. Order Confirmation          │  15. Order → Order Book         │
-   │      with token, lots, balance   │      → Exec Report → FIX Output │
-   │<─────────────────────────────────┤                                 │
-   │                                  │                                 │
-```
-
-**Key Points**:
-- **Login (Steps 1-5)**: Browser sends credentials → Web Server calls Player Service via gRPC → Token returned to browser
-- **Token Storage (Step 6)**: Token stored in sessionStorage (browser-only, not URL, prevents leaks)
-- **WebSocket Connection (Steps 7-10)**: Browser opens WebSocket with token & username as query params → Web Server validates token with Player Service implicitly → Connection established
-- **Trade Execution (Steps 11-15)**: WebSocket order → Web Server calls Player Service gRPC `add_trade()` → Portfolio updated → Order routed to Order Book → Execution report sent back
-- **No Session Registry**: Player Service is stateless; each request validates the token implicitly
-- **HTTP/2 Multiplexing**: All gRPC calls (login, add_trade, etc.) use single TCP connection with concurrent streams
 
 ## Crates
 
@@ -224,159 +182,85 @@ BROWSER                          WEB SERVER                      PLAYER SERVICE
 | `web` | Web interface layer (WebSocket/API) for interacting with the simulator. | [Web Client](crates/web/README.md) |
 | `db` | PostgreSQL persistence for order events/results, trades, and pending orders. | [Database](crates/db/README.md) |
 
-### Proxy Crate
+## Technical stack
 
-The `proxy` crate acts as a bridge between the market data multicast feeds and WebSocket clients. It receives market and snapshot feeds via UDP multicast, then forwards them to connected clients over WebSocket endpoints using an Axum/Tokio server.
+| Component | Technical stack |
+|---|---|
+| Gateway / Market Web Backend | Rust, **Axum**, **Tokio**, `tower-http`, WebSocket (`tokio-tungstenite`), `reqwest`, `sqlx`, `tonic` |
+| Player Service (`crates/web/players`) | Rust, **Tokio**, **gRPC** (`tonic`/`prost`), `sqlx` (PostgreSQL), `argon2`, `jsonwebtoken` (JWT) |
+| FIX Engine (`crates/protocol/FIX`) | Rust, custom FIX parser/engine, `tokio`, `crossbeam`, custom `spsc` queue |
+| Order Book (`crates/order-book`) | Rust, custom matching engine, `crossbeam-channel`, `arc-swap`, custom `spsc` queue |
+| Execution Report Engine | Rust, custom execution-report crate, `crossbeam-channel`, custom `spsc` queue |
+| Database Layer (`crates/db`) | PostgreSQL, `sqlx`, `tokio`, `serde_json` |
+| gRPC Control (`crates/grpc`) | Rust, **gRPC** (`tonic`/`prost`), `tokio`, `sqlx` |
+| Market Feed / Snapshot / Proxy | Rust, UDP/multicast path, `crossbeam-channel`, custom `spsc`, `bytemuck` |
+| Observability | Prometheus endpoint (`/metrics`), `prometheus-client`, `tracing` / `tracing-subscriber` |
+| Deployment | Docker, Docker Compose (`deployment/docker-compose.yml`) |
 
-**Key Features:**
-
-- Listens to market data and snapshot multicast feeds (UDP).
-- Forwards received data to all connected WebSocket clients in real time.
-- Provides two WebSocket endpoints:
-    - `/ws/market` for market data feed
-    - `/ws/snapshot` for snapshot feed
-- Graceful shutdown and CPU pinning support for low-latency operation.
-
-**Architecture Workflow:**
-
-```
-    +-------------------+         +-------------------+         +-------------------+
-    |                   |         |                   |         |                   |
-    |  Market Data Feed |         |   Proxy (Axum)    |         |   WebSocket       |
-    |  Multicast Source | ======> |  Multicast Socket | ======> |   Clients         |
-    |                   |         |   Listener(s)     |         |                   |
-    +-------------------+         |                   |         +-------------------+
-                                                                |   Snapshot Socket |
-    +-------------------+         |   Listener(s)     |
-    |                   |         |                   |
-    | Snapshot Feed     | ======> |                   |
-    | Multicast Source  |         |                   |
-    +-------------------+         +-------------------+
-
-Legend:
-======>  UDP Multicast
------>  Internal async channel (broadcast)
-=====>  WebSocket (Axum endpoint)
-```
-
-**Endpoints:**
-
-- `ws://<proxy_ip>:<proxy_port>/ws/market` — Market data stream
-- `ws://<proxy_ip>:<proxy_port>/ws/snapshot` — Snapshot stream
-
-**How it works:**
-
-1. The proxy joins the configured multicast groups for market and snapshot feeds.
-2. Each feed is received on a UDP socket and forwarded to a Tokio broadcast channel.
-3. Axum WebSocket handlers subscribe to these channels and push data to all connected clients.
-4. The proxy can be pinned to a specific CPU core for low-latency, high-performance operation.
-
-**Configuration:**
-
-- The proxy’s IP, port, and multicast group addresses are set in the main config file (`crates/config/default.json`).
-- The proxy can be started as part of the simulator or standalone for market data distribution.
-
-**Example Python WebSocket client:**
-
-```python
-import asyncio
-import websockets
-
-async def main():
-        uri = "ws://127.0.0.1:9889/ws/snapshot"
-        async with websockets.connect(uri) as websocket:
-                async for message in websocket:
-                        print(f"Received: {len(message)} bytes")
-
-asyncio.run(main())
-```
-
-**See also:**
-- [crates/proxy/README.md](crates/proxy/README.md) for implementation details.
-
-─
 ## Quick Start
 
-1. Set the market-specific PostgreSQL environment variables.
-2. Start the simulator with `cargo run --release`.
-3. Connect through a FIX client or the web interface.
+Use Docker Compose from the `market-simulator` directory (compose file is in `deployment/`):
+
+```bash
+# 1) Build release binaries used by Docker images
+./build-release.sh
+
+# 2) Build and start all services
+docker-compose -f deployment/docker-compose.yml build
+docker-compose -f deployment/docker-compose.yml up -d
+
+# 3) Check status/logs
+docker-compose -f deployment/docker-compose.yml ps
+docker-compose -f deployment/docker-compose.yml logs -f
+```
+
+> **Warning**
+> For the gateway, use **only one** config at a time:
+> - `crates/config/gateway/docker.local.json` (local/docker-compose setup)
+> - `crates/config/gateway/docker.json` (non-local/deployment setup)
+>
+> Do not mix both in the same run.
+
+Quick access:
+
+- Gateway: http://localhost:9860
+- NASDAQ web: http://localhost:19870
+- NYSE web: http://localhost:19885
+
+Stop services:
+
+```bash
+docker-compose -f deployment/docker-compose.yml down
+```
 
 The detailed setup is documented below in the simulator runtime section.
 
-## Running the Simulator
+## Dockerfile and Compose setup:
 
-### Database configuration
+Docker artifacts are under `deployment/`:
 
-The simulator uses two persistence scopes:
+| File | Purpose |
+|---|---|
+| `deployment/docker-compose.yml` | Orchestrates all services (`postgres`, `players-service`, `gateway`, `market-nasdaq`, `market-nyse`). |
+| `deployment/Dockerfile.gateway` | Runtime image containing both `gateway` and `market-simulator` binaries. |
+| `deployment/Dockerfile.players` | Runtime image for the players gRPC service (`players-server`). |
+| `deployment/Dockerfile` | Generic runtime image for `market-simulator` binary (single-binary use). |
 
-- per-market databases for order/trade/pending-order persistence
-- one global database for player accounts/portfolio/tokens
+Important notes:
 
-In `crates/config/default.json`, each market declares:
+1. Build binaries first: `./build-release.sh` (required before Docker build).
+2. Use compose with explicit file path: `docker-compose -f deployment/docker-compose.yml ...`.
+3. Gateway command should use only one config at a time: `crates/config/gateway/docker.local.json` **or** `crates/config/gateway/docker.json`.
 
-- `database_url_env` (preferred): name of the environment variable to read
-- `database_url` (optional fallback): direct connection string
+## Ressources
 
-And globally (top-level in the same config file):
+- [Architecture and Design](./papers/architecture.md)
+- [Market Simulator Design Notes](./papers/market-simulator.md)
+- [FIX Parser Notes](./papers/fix-parser.md)
+- [Idempotency](./papers/idempotency.md)
+- [Metrics and Monitoring](./papers/metrics.md)
+- [File Structure](./papers/files-structure.md)
 
-- `player_database_url_env` (preferred): env var for the shared player database
-- `player_database_url` (optional fallback): direct connection string
-
-Default config uses:
-
-- `DATABASE_URL_MARKET_SIMULATOR`
-- `DATABASE_URL_NASDAQ`
-- `DATABASE_URL_NYSE`
-
-Set all three before starting:
-
-```bash
-export DATABASE_URL_MARKET_SIMULATOR=postgres://<user>:<password>@localhost:5432/market_simulator
-export DATABASE_URL_NASDAQ=postgres://<user>:<password>@localhost:5432/market_nasdaq
-export DATABASE_URL_NYSE=postgres://<user>:<password>@localhost:5432/market_nyse
-```
-
-The simulator creates its tables on startup. The PostgreSQL user in each URL must therefore be able to create and alter tables in the active schema.
-
-If your role cannot use `public`, either grant it access or point the connection at a schema you own via `search_path`, for example:
-
-```bash
-export DATABASE_URL_NASDAQ='postgres://<user>:<password>@localhost:5432/market_nasdaq?options=-csearch_path%3Dmarket_nasdaq'
-export DATABASE_URL_NYSE='postgres://<user>:<password>@localhost:5432/market_nyse?options=-csearch_path%3Dmarket_nyse'
-```
-
-Note: the schema named in `search_path` must already exist. PostgreSQL does not create a schema just because the database has the same name.
-
-Example setup:
-
-```sql
-CREATE DATABASE market_nasdaq;
-CREATE DATABASE market_nyse;
-
--- The next commands must be run inside each target database, not in `postgres`.
-\c market_nasdaq
-CREATE SCHEMA market_nasdaq AUTHORIZATION <user>;
-
-\c market_nyse
-CREATE SCHEMA market_nyse AUTHORIZATION <user>;
-```
-
-If the schema already exists but belongs to another role, grant at least:
-
-```sql
-GRANT USAGE, CREATE ON SCHEMA market_nasdaq TO <user>;
-GRANT USAGE, CREATE ON SCHEMA market_nyse TO <user>;
-```
-
-Then run:
-
-To run the simulator, you can use the following command:
-
-```bash
-cargo run --release
-```
-
-This will start the server and allow clients to connect and interact with the simulated market. The default IP address and port for the server can be configured in the `server` crate. (eg. `1127.0.0.1:9876`)
 
 ## Contributing
 
@@ -391,6 +275,7 @@ Suggested workflow:
 
 Areas that are especially useful for contributions:
 
+- Rebuild the frontend client with native frameworks (e.g. React/Vite) instead of vanilla JS/HTML.
 - additional order types and FIX coverage
 - recovery and replay support
 - monitoring, metrics, and observability
@@ -418,7 +303,6 @@ When reporting a problem, include:
 
 - Create a private network so anyone can receive multicast market data updates and connect to the FIX port without exposing the server to the internet.
 - Implement the replayer based on log files to allow for backtesting and analysis of market data.
-- Adding more support for logging and monitoring, including metrics collection and alerting.
 - Add more command [Cancel, Replace] and order types [Stop, StopLimit] to the order book and matching engine.
 - Add more instruments and support for multiple symbols in the order book and matching engine.
 - Improve recovery workflows with snapshots + incremental logs.
