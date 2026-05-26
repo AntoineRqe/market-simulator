@@ -375,8 +375,6 @@ mod tests {
     #[test]
     fn test_engine() {
         let mut inbound_queue = spsc::spsc_lock_free::RingBuffer::<OrderEvent, 1024>::new();
-        let mut outbound_queue =
-            spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), 1024>::new();
 
         thread::scope(|s| {
             let shutdown = Arc::new(AtomicBool::new(false));
@@ -384,7 +382,8 @@ mod tests {
             let snapshot_ptr = Arc::new(ArcSwap::from_pointee(Snapshot::default()));
 
             let (inbound_producer, inbound_consumer) = inbound_queue.split();
-            let (outbound_producer, outbound_consumer) = outbound_queue.split();
+            let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+            let outbound_producer = Arc::new(outbound_tx);
 
             let (_control_tx, control_rx) = crossbeam_channel::unbounded();
             let mut engine = OrderBookEngine::new(
@@ -421,7 +420,9 @@ mod tests {
             inbound_producer.push(order).unwrap();
             // Give some time for the engine to process the order
             std::thread::sleep(std::time::Duration::from_millis(100));
-            let (order_event, order_result) = outbound_consumer.pop().unwrap();
+            let (order_event, order_result) = outbound_rx
+                .recv_timeout(std::time::Duration::from_millis(500))
+                .expect("expected first outbound execution report");
 
             assert!(order_event.price == FixedPointArithmetic::from_f64(100.0));
             assert!(order_result.trades.len() == 0);
@@ -445,7 +446,9 @@ mod tests {
             inbound_producer.push(order2).unwrap();
             // Give some time for the engine to process the order
             std::thread::sleep(std::time::Duration::from_millis(100));
-            let (order_event2, order_result2) = outbound_consumer.pop().unwrap();
+            let (order_event2, order_result2) = outbound_rx
+                .recv_timeout(std::time::Duration::from_millis(500))
+                .expect("expected second outbound execution report");
 
             assert!(order_event2.price == FixedPointArithmetic::from_f64(100.0));
             assert!(order_result2.trades.len() == 1); // One trade should be executed for the matching orders

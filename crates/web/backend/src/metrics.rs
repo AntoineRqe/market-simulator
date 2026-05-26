@@ -579,6 +579,6 @@ mod tests {
     fn test_create_metrics_registry() {
         let registry = create_metrics_registry();
         // Just verify it can be created without panic
-        assert!(!std::mem::size_of_val(&registry) == 0);
+        assert_ne!(std::mem::size_of_val(&registry), 0);
     }
 }
