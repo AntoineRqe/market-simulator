@@ -322,7 +322,7 @@ impl PlayerStore {
                             }
                         }
                         _ => {
-                            // For cancel rejections (type 9), also remove from pending to free up tokens
+                            // For cancel rejections (type 9), also r[Market Simulator] Remove dead codeemove from pending to free up tokens
                             if is_cancel_reject {
                                 player.pending_orders.remove(pos);
                                 changed = true;

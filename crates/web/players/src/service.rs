@@ -215,7 +215,7 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
         if let Some(pool) = pool {
             if is_buy {
                 // For buy trades, insert a new portfolio lot
-                if let Err(e) = crate::players::portfolio::insert_portfolio_lot(
+                if let Err(e) = crate::players::insert_portfolio_lot(
                     &pool,
                     &req.username,
                     &req.symbol.to_uppercase(),
@@ -231,7 +231,7 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
                 }
             } else {
                 // For sell trades, consume portfolio lots (FIFO)
-                if let Err(e) = crate::players::portfolio::consume_portfolio_lots_fifo(
+                if let Err(e) = crate::players::consume_portfolio_lots_fifo(
                     &pool,
                     &req.username,
                     &req.symbol.to_uppercase(),
