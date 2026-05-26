@@ -12,3 +12,8 @@ scrape_configs:
     static_configs:
       - targets: ["localhost:19870"] # Your web server address
     metrics_path: "/metrics" # Endpoint to scrape
+
+  - job_name: "players-service"
+    static_configs:
+      - targets: ["localhost:19102"] # Players metrics endpoint (local host mapping)
+    metrics_path: "/metrics" # Endpoint to scrape

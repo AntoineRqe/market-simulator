@@ -31,17 +31,29 @@ services:
       DATABASE_URL_MARKET_SIMULATOR: postgresql://market_user:market_password@postgres:5432/market_simulator
       DB_MAX_CONNECTIONS: 30
       DB_ACQUIRE_TIMEOUT_SECS: 30
+      # Keep explicit ports for backward compatibility with older players binaries
+      # that still read env vars instead of JSON config.
       PLAYER_SERVICE_PORT: 50053
+      PLAYER_METRICS_PORT: 9102
       JWT_SECRET: jwt-secret-key-change-in-production
       RUST_LOG: info
     ports:
       - "50053:50053"
+      - "19102:9102"
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test:
+        ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/50053' 2>/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
     networks:
       - market-network
     restart: unless-stopped
+    command: ["--config", "/app/config/players/docker.json"]
 
   # Gateway Service (Login page)
   gateway:
@@ -60,7 +72,7 @@ services:
       postgres:
         condition: service_healthy
       players-service:
-        condition: service_started
+        condition: service_healthy
       market-nasdaq:
         condition: service_healthy
       market-nyse:
@@ -90,7 +102,7 @@ services:
       postgres:
         condition: service_healthy
       players-service:
-        condition: service_started
+        condition: service_healthy
     healthcheck:
       test:
         ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/9870' 2>/dev/null"]
@@ -124,7 +136,7 @@ services:
       postgres:
         condition: service_healthy
       players-service:
-        condition: service_started
+        condition: service_healthy
     healthcheck:
       test:
         ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/9885' 2>/dev/null"]

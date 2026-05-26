@@ -1,7 +1,9 @@
 // Players library exports for use by other crates
 pub mod players;
+pub mod metrics;
 pub mod service;
 
+pub use metrics::{PlayerMetrics, create_metrics_registry};
 pub use players::token::{TokenClaims, generate_token, get_jwt_secret, validate_token};
 pub use players::{
     AuthError, HoldingSummary, INITIAL_TOKENS, PendingOrder, Player, PlayerStore, PortfolioLot,

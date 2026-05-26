@@ -11,9 +11,11 @@ RUN apt-get update && apt-get install -y \
 
 # Copy the pre-compiled binary from local build
 COPY target/release/players-server /app/players-server
+COPY crates/config/players /app/config/players
 
 # Expose gRPC port
 EXPOSE 50053
+EXPOSE 9102
 
 ENV RUST_LOG=info
 

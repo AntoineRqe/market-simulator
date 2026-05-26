@@ -38,6 +38,7 @@ Once running:
 | **NYSE gRPC** | 50052 | Order book (gRPC) |
 | **NYSE Proxy** | 9892 | Market data proxy |
 | **Players Service** | 50053 | gRPC (Player Service) |
+| **Players Metrics** | 19102 | Prometheus scrape endpoint (`/metrics`) |
 | **PostgreSQL** | 5433 | Database |
 
 ## Configuration
@@ -49,9 +50,12 @@ Edit `docker-compose.yml` to customize:
 ```yaml
 environment:
   DATABASE_URL_MARKET_SIMULATOR: postgresql://user:password@postgres:5432/market_simulator
-  PLAYER_SERVICE_PORT: 50052
   RUST_LOG: info  # Use 'debug' for more verbose logging
 ```
+
+Players service ports are configured via JSON config file:
+- Local: `crates/config/players/default.json`
+- Docker/Internet: `crates/config/players/docker.json`
 
 ### Database
 
@@ -90,6 +94,7 @@ docker-compose ps
 - Database: localhost:5433
 - Order Book gRPC: localhost:50051 (NASDAQ), localhost:50052 (NYSE)
 - Players Service: localhost:50053
+- Players Metrics: http://localhost:19102/metrics
 
 **Between Containers (Internal):**
 - Players Service: players-service:50053

@@ -1,17 +1,19 @@
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
+use crate::metrics::PlayerMetrics;
 use crate::pb::players::v1::*;
 use crate::players::{PlayerStore, extract_id_suffix, generate_token};
 use utils::market_name;
 
 pub struct PlayerServiceImpl {
     store: Arc<PlayerStore>,
+    metrics: Arc<PlayerMetrics>,
 }
 
 impl PlayerServiceImpl {
-    pub fn new(store: Arc<PlayerStore>) -> Self {
-        Self { store }
+    pub fn new(store: Arc<PlayerStore>, metrics: Arc<PlayerMetrics>) -> Self {
+        Self { store, metrics }
     }
 }
 
@@ -21,6 +23,7 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
         &self,
         request: Request<AuthRequest>,
     ) -> Result<Response<AuthResponse>, Status> {
+        let _timer = self.metrics.start_rpc("authenticate");
         let req = request.into_inner();
 
         if req.username.is_empty() {
@@ -116,6 +119,7 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
         &self,
         request: Request<GetPlayerStateRequest>,
     ) -> Result<Response<PlayerState>, Status> {
+        let mut timer = self.metrics.start_rpc("get_player_state");
         let req = request.into_inner();
 
         match self.store.get_player(&req.username) {
@@ -161,7 +165,10 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
                     id_suffix: "TEST".to_string(),
                 }))
             }
-            None => Err(Status::not_found("Player not found")),
+            None => {
+                timer.mark_grpc_error();
+                Err(Status::not_found("Player not found"))
+            }
         }
     }
 
@@ -169,6 +176,7 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
         &self,
         request: Request<UpdatePendingOrdersRequest>,
     ) -> Result<Response<UpdateResult>, Status> {
+        let _timer = self.metrics.start_rpc("update_pending_orders");
         let req = request.into_inner();
 
         // Clear existing orders and add new ones
@@ -193,6 +201,7 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
         &self,
         request: Request<AddTradeRequest>,
     ) -> Result<Response<UpdateResult>, Status> {
+        let _timer = self.metrics.start_rpc("add_trade");
         let req = request.into_inner();
 
         // Side "1" = buy, "2" = sell
@@ -291,6 +300,7 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
         &self,
         request: Request<ApplyFixExecutionReportRequest>,
     ) -> Result<Response<UpdateResult>, Status> {
+        let _timer = self.metrics.start_rpc("apply_fix_execution_report");
         let req = request.into_inner();
         let (success, error_message) = match self.store.apply_fix_execution_report(&req.fix_body) {
             Ok(()) => (true, String::new()),
@@ -307,6 +317,7 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
         &self,
         _request: Request<RecordVisitRequest>,
     ) -> Result<Response<RecordVisitResponse>, Status> {
+        let _timer = self.metrics.start_rpc("record_visit");
         // Increment the all-time visitor count and return the new total
         let total = self.store.record_visit();
 
@@ -319,6 +330,7 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
         &self,
         request: Request<ResetTokensRequest>,
     ) -> Result<Response<UpdateResult>, Status> {
+        let _timer = self.metrics.start_rpc("reset_tokens");
         let req = request.into_inner();
         self.store.reset_tokens(&req.username);
 
@@ -332,6 +344,7 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
         &self,
         request: Request<ResetSeqRequest>,
     ) -> Result<Response<UpdateResult>, Status> {
+        let _timer = self.metrics.start_rpc("reset_seq");
         let req = request.into_inner();
 
         // Reset FIX message sequence number for the player
@@ -351,6 +364,7 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
         &self,
         _request: Request<ResetMarketStateRequest>,
     ) -> Result<Response<ResetMarketStateResponse>, Status> {
+        let _timer = self.metrics.start_rpc("reset_market_state");
         let (players_touched, orders_removed) = self.store.reset_market_state();
 
         tracing::info!(
@@ -369,6 +383,7 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
         &self,
         _request: Request<ResetAllTokensRequest>,
     ) -> Result<Response<ResetAllTokensResponse>, Status> {
+        let _timer = self.metrics.start_rpc("reset_all_tokens");
         let players_reset = self.store.reset_all_tokens();
 
         tracing::info!(
@@ -385,6 +400,7 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
         &self,
         request: Request<UpdateVisitorsRequest>,
     ) -> Result<Response<UpdateResult>, Status> {
+        let _timer = self.metrics.start_rpc("update_visitors");
         let req = request.into_inner();
 
         // Update the total visitor count (active_count is managed by the backend)

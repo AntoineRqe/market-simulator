@@ -98,6 +98,13 @@ pub struct GatewayConfig {
 }
 
 #[derive(Clone, Deserialize)]
+pub struct PlayersConfig {
+    pub database_url_env: String,
+    pub grpc: Connection,
+    pub metrics: Connection,
+}
+
+#[derive(Clone, Deserialize)]
 pub struct EngineCoreMapping {
     pub fix_inbound_core: usize,
     pub fix_outbound_core: usize,
@@ -176,6 +183,25 @@ impl GatewayConfig {
             .unwrap_or_else(|err| panic!("failed to read config file '{}': {err}", file_path));
 
         serde_json::from_str::<GatewayConfig>(&file_content)
+            .unwrap_or_else(|err| panic!("failed to parse config file '{}': {err}", file_path))
+    }
+}
+
+impl PlayersConfig {
+    pub fn resolve_database_url(&self) -> Result<String, String> {
+        env::var(&self.database_url_env).map_err(|_| {
+            format!(
+                "missing env var '{}' for players database",
+                self.database_url_env
+            )
+        })
+    }
+
+    pub fn parse_from_file(file_path: &str) -> Self {
+        let file_content = fs::read_to_string(file_path)
+            .unwrap_or_else(|err| panic!("failed to read config file '{}': {err}", file_path));
+
+        serde_json::from_str::<PlayersConfig>(&file_content)
             .unwrap_or_else(|err| panic!("failed to parse config file '{}': {err}", file_path))
     }
 }
