@@ -193,15 +193,6 @@ pub fn get_holdings_summary(&self, username: &str) -> HashMap<String, HoldingSum
 pub fn apply_fix_execution_report(&self, fix_body: &str) -> bool;
 pub fn apply_fix_execution_report(&self, fix_body: &str) -> Result<(), String>;
 
-pub fn apply_trade_from_feed(
-    &self,
-    trade_id: u64,
-    passive_cl_ord_id: &str,
-    symbol: &str,
-    quantity: f64,
-    price: f64,
-) -> bool;
-
 pub async fn load_portfolio_lots_for_user(
     pool: &PgPool,
     username: &str,
