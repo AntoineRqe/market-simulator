@@ -32,7 +32,7 @@ impl PlayerStore {
     /// Returns an empty vec if the player has no lots or the pool is unavailable.
     pub fn get_portfolio(&self, username: &str) -> Vec<PortfolioLot> {
         let pool = {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.read().unwrap();
             inner.pool.clone()
         };
         let Some(pool) = pool else {
@@ -47,7 +47,7 @@ impl PlayerStore {
     pub fn get_holdings_summary(&self, username: &str) -> HashMap<String, HoldingSummary> {
         // Check cache first
         {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.read().unwrap();
             if let Some(cached) = inner.holdings_cache.get(username) {
                 return cached.clone();
             }
@@ -81,7 +81,7 @@ impl PlayerStore {
 
         // Store in cache
         self.inner
-            .lock()
+            .write()
             .unwrap()
             .holdings_cache
             .insert(username.to_string(), summary.clone());
@@ -91,7 +91,7 @@ impl PlayerStore {
 
     /// Invalidate the holdings cache for a player (call after any trade).
     pub fn invalidate_holdings_cache(&self, username: &str) {
-        self.inner.lock().unwrap().holdings_cache.remove(username);
+        self.inner.write().unwrap().holdings_cache.remove(username);
     }
 
     /// Apply a FIX execution report to player state (tokens, pending orders).
@@ -146,7 +146,7 @@ impl PlayerStore {
             return Err(err);
         }
 
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.write().unwrap();
 
         let last_qty = parse_f64(fields.get("32").map(String::as_str));
         let last_px = parse_f64(fields.get("31").map(String::as_str));
@@ -348,7 +348,7 @@ impl PlayerStore {
         // Perform portfolio lot insert (buy) or FIFO consume (sell) after flush.
         if let Some((uname, lot_side, lot_symbol, lot_qty, lot_px)) = lot_op {
             let pool = {
-                let inner = self.inner.lock().unwrap();
+                let inner = self.inner.read().unwrap();
                 inner.pool.clone()
             };
             if let Some(pool) = pool {
@@ -364,7 +364,7 @@ impl PlayerStore {
                                 market_name()
                             );
                         } else {
-                            store_inner.lock().unwrap().holdings_cache.remove(&uname);
+                            store_inner.write().unwrap().holdings_cache.remove(&uname);
                         }
                     } else if lot_side == "2" {
                         // Sell: FIFO consume from existing lots.
@@ -376,7 +376,7 @@ impl PlayerStore {
                                 market_name()
                             );
                         } else {
-                            store_inner.lock().unwrap().holdings_cache.remove(&uname);
+                            store_inner.write().unwrap().holdings_cache.remove(&uname);
                         }
                     }
                 });

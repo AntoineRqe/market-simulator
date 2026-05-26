@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 /// Tokens each new player receives on registration.
 pub const INITIAL_TOKENS: f64 = 10_000.0;
@@ -61,7 +61,7 @@ pub(crate) struct StorageData {
 /// Cloning is cheap — the inner state is Arc-backed.
 #[derive(Clone)]
 pub struct PlayerStore {
-    pub inner: Arc<Mutex<StoreInner>>,
+    pub inner: Arc<RwLock<StoreInner>>,
 }
 
 pub struct StoreInner {

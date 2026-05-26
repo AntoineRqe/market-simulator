@@ -208,7 +208,7 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
 
         // Get the pool for database operations
         let pool = {
-            let inner = self.store.inner.lock().unwrap();
+            let inner = self.store.inner.read().unwrap();
             inner.pool.clone()
         };
 
@@ -250,7 +250,7 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
         // Update player's token balance: increase for sell, decrease for buy
         let notional = req.quantity * req.price;
         {
-            let mut inner = self.store.inner.lock().unwrap();
+            let mut inner = self.store.inner.write().unwrap();
             if let Some(player) = inner.players.get_mut(&req.username) {
                 if is_buy {
                     player.tokens -= notional;

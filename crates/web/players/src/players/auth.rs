@@ -90,7 +90,7 @@ impl PlayerStore {
             return Err(AuthError::PasswordRequired);
         }
 
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.write().unwrap();
         match inner.players.get_mut(username) {
             Some(player) => match verify_or_upgrade_password(&player.password, password) {
                 Ok(PasswordCheck::Verified) => {
@@ -141,7 +141,7 @@ impl PlayerStore {
             return false;
         }
 
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.write().unwrap();
         if inner.players.contains_key(username) {
             return false;
         }
@@ -160,7 +160,7 @@ impl PlayerStore {
 
     /// Record a player's connection (increment connection count and track IP).
     pub fn record_connection(&self, username: &str, ip: Option<&str>) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.write().unwrap();
         let Some(player) = inner.players.get_mut(username) else {
             return;
         };

@@ -14,7 +14,7 @@ pub use storage::{
 };
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use utils::market_name;
 
 use models::StorageData;
@@ -77,7 +77,7 @@ impl PlayerStore {
         };
 
         PlayerStore {
-            inner: Arc::new(Mutex::new(StoreInner {
+            inner: Arc::new(RwLock::new(StoreInner {
                 players,
                 order_owners,
                 processed_exec_ids: HashSet::new(),
@@ -93,7 +93,7 @@ impl PlayerStore {
     #[cfg(test)]
     fn from_storage_data(storage: StorageData) -> Self {
         PlayerStore {
-            inner: Arc::new(Mutex::new(StoreInner {
+            inner: Arc::new(RwLock::new(StoreInner {
                 players: storage.players,
                 order_owners: storage.order_owners,
                 processed_exec_ids: HashSet::new(),
@@ -113,7 +113,7 @@ impl PlayerStore {
     /// but the password does not match.
     /// Return a snapshot of the player's current state, or `None` if unknown.
     pub fn get_player(&self, username: &str) -> Option<Player> {
-        self.inner.lock().unwrap().players.get(username).cloned()
+        self.inner.read().unwrap().players.get(username).cloned()
     }
 
     /// Record a newly placed order.
@@ -121,7 +121,7 @@ impl PlayerStore {
     /// Token balance does NOT change at NEW time; it changes only when
     /// transactions (fills) occur via execution reports.
     pub fn add_pending_order(&self, username: &str, order: PendingOrder) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.write().unwrap();
         let cl_ord_id = order.cl_ord_id.clone();
         let mut inserted = false;
         if let Some(player) = inner.players.get_mut(username) {
@@ -140,7 +140,7 @@ impl PlayerStore {
     ///
     /// Token balance does NOT change on cancel/remove; only fills move tokens.
     pub fn remove_pending_order(&self, username: &str, cl_ord_id: &str) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.write().unwrap();
         if let Some(player) = inner.players.get_mut(username) {
             if let Some(pos) = player
                 .pending_orders
@@ -158,7 +158,7 @@ impl PlayerStore {
 
     /// Return a snapshot of all known cl_ord_id -> username associations.
     pub fn get_order_owners(&self) -> HashMap<String, String> {
-        self.inner.lock().unwrap().order_owners.clone()
+        self.inner.read().unwrap().order_owners.clone()
     }
 
     /// Hydrate cl_ord_id -> username associations during startup.
@@ -168,7 +168,7 @@ impl PlayerStore {
     ///
     /// Returns the number of associations inserted or updated.
     pub fn hydrate_order_owners_from_sender_ids(&self, entries: &[(String, String)]) -> usize {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.write().unwrap();
         let mut updated = 0usize;
 
         for (cl_ord_id, sender_id) in entries {
@@ -205,7 +205,7 @@ impl PlayerStore {
     ///
     /// Returns `true` if the player exists and was updated.
     pub fn reset_tokens(&self, username: &str) -> bool {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.write().unwrap();
         let Some(player) = inner.players.get_mut(username) else {
             return false;
         };
@@ -220,7 +220,7 @@ impl PlayerStore {
     ///
     /// Returns the number of players updated.
     pub fn reset_all_tokens(&self) -> usize {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.write().unwrap();
         let mut updated = 0usize;
 
         for player in inner.players.values_mut() {
@@ -240,7 +240,7 @@ impl PlayerStore {
     ///
     /// Returns `(players_touched, orders_removed)`.
     pub fn reset_market_state(&self) -> (usize, usize) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.write().unwrap();
         let mut players_touched = 0usize;
         let mut orders_removed = 0usize;
 
@@ -276,14 +276,14 @@ impl PlayerStore {
 
     /// Return the all-time total visitor count persisted across restarts.
     pub fn total_visitors(&self) -> u64 {
-        self.inner.lock().unwrap().total_visitor_count
+        self.inner.read().unwrap().total_visitor_count
     }
 
     /// Increment the all-time visitor counter and persist immediately.
     /// Returns the new total.
     pub fn record_visit(&self) -> u64 {
         let new_total = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.write().unwrap();
             inner.total_visitor_count = inner.total_visitor_count.saturating_add(1);
             inner.total_visitor_count
         };
@@ -295,7 +295,7 @@ impl PlayerStore {
     /// Called by the backend to persist its tracked visitor metrics.
     pub fn update_visitor_count(&self, total: i32) {
         let new_total = total as u64;
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.write().unwrap();
         // Use max to avoid overwriting with lower value (in case of race conditions)
         inner.total_visitor_count = inner.total_visitor_count.max(new_total);
         drop(inner);
@@ -309,7 +309,7 @@ impl PlayerStore {
     /// Additional flush requests while a flush is running are coalesced into one follow-up run.
     /// Retries up to 3 times with exponential backoff on transient deadlocks.
     pub fn flush(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.write().unwrap();
         if inner.pool.is_none() {
             return;
         }
@@ -327,10 +327,10 @@ impl PlayerStore {
             const MAX_RETRIES: u32 = 3;
             loop {
                 let (pool, data) = {
-                    let inner = store.inner.lock().unwrap();
+                    let inner = store.inner.read().unwrap();
                     let Some(pool) = inner.pool.clone() else {
                         drop(inner);
-                        let mut inner = store.inner.lock().unwrap();
+                        let mut inner = store.inner.write().unwrap();
                         inner.flush_in_progress = false;
                         inner.flush_pending = false;
                         return;
@@ -373,7 +373,7 @@ impl PlayerStore {
                     }
                 }
 
-                let mut inner = store.inner.lock().unwrap();
+                let mut inner = store.inner.write().unwrap();
                 if inner.flush_pending {
                     inner.flush_pending = false;
                     drop(inner);
