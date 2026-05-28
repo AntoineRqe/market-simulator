@@ -240,22 +240,21 @@ impl FIXSessionManager {
                                         .trades
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                                    let Some(trade_price) = parse_fix_tag_f64(&raw_msg, "31") else {
+                                    let trade_qty = (exec_data.qty - exec_data.leaves_qty).max(0.0);
+                                    let trade_price = exec_data.price;
+
+                                    if !(trade_price.is_finite()
+                                        && trade_price > 0.0
+                                        && trade_qty.is_finite()
+                                        && trade_qty > 0.0)
+                                    {
                                         tracing::debug!(
-                                            "[{}] Skipping trade event: missing LastPx(31) for cl_ord_id={}",
+                                            "[{}] Skipping trade event: invalid LastPx/LastQty for cl_ord_id={}",
                                             market_name(),
                                             exec_data.cl_ord_id
                                         );
                                         continue;
-                                    };
-                                    let Some(trade_qty) = parse_fix_tag_f64(&raw_msg, "32") else {
-                                        tracing::debug!(
-                                            "[{}] Skipping trade event: missing LastQty(32) for cl_ord_id={}",
-                                            market_name(),
-                                            exec_data.cl_ord_id
-                                        );
-                                        continue;
-                                    };
+                                    }
 
                                     let trade_view = TradeView {
                                         id: exec_data.order_id,
@@ -423,19 +422,6 @@ fn trim_fixed_decimal(value: &str) -> String {
     }
 }
 
-fn parse_fix_tag_f64(raw: &[u8], tag: &str) -> Option<f64> {
-    raw.split(|b| *b == b'\x01').find_map(|field| {
-        let field = std::str::from_utf8(field).ok()?;
-        let (k, v) = field.split_once('=')?;
-        if k == tag {
-            let cleaned = v.trim_matches(char::from(0)).trim();
-            cleaned.parse::<f64>().ok()
-        } else {
-            None
-        }
-    })
-}
-
 /// Short label for a FIX message.
 pub fn classify_fix_msg(raw: &[u8]) -> String {
     let s = String::from_utf8_lossy(raw);
@@ -530,5 +516,20 @@ fn update_backend_order_book_from_exec_report(
             );
         }
         _ => {} // Unknown status, ignore
+    }
+
+    // For taker-side fills, also consume liquidity from the passive side at LastPx/LastQty.
+    // This keeps the displayed L3/L2 book quantities in sync with executed trades.
+    let trade_qty = (exec.qty - exec.leaves_qty).max(0.0);
+    if exec.is_aggressor && matches!(exec.ord_status, 1 | 2) && trade_qty.is_finite() && trade_qty > 0.0
+    {
+        symbol_book.apply_trade(
+            exec.side,
+            trade_qty,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        );
     }
 }

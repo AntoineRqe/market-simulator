@@ -546,7 +546,6 @@ impl<const N: usize> ExecutionReportEngine<N> {
         let cl_ord_id = order_event.cl_ord_id.to_string();
         let traded_qty = order_result.trades.quantity_sum();
         let leaves_qty = (order_event.quantity - traded_qty).to_f64().max(0.0);
-
         ExecReportData {
             order_id: Self::stable_order_id_from_cl_ord_id(&cl_ord_id),
             cl_ord_id,

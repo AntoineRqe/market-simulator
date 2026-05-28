@@ -221,18 +221,17 @@ impl SymbolOrderBook {
         self.last_update_ms = timestamp_ms;
     }
 
-    /// Apply a trade to the passive side of the book at the traded price.
+    /// Apply a trade to the passive side of the book.
     ///
     /// `aggressor_side`: 1=buy, 2=sell.
     /// A buy aggressor consumes asks, a sell aggressor consumes bids.
     pub fn apply_trade(
         &mut self,
         aggressor_side: u8,
-        trade_price: f64,
         trade_qty: f64,
         timestamp_ms: u64,
     ) {
-        if !(trade_qty.is_finite() && trade_qty > 0.0 && trade_price.is_finite()) {
+        if !(trade_qty.is_finite() && trade_qty > 0.0) {
             self.last_update_ms = timestamp_ms;
             return;
         }
@@ -241,34 +240,37 @@ impl SymbolOrderBook {
         let mut remaining = trade_qty;
         let mut to_remove: Vec<u64> = Vec::new();
 
-        let mut candidates: Vec<(u64, u64)> = match passive_side {
+        let mut candidates: Vec<(u64, f64, u64)> = match passive_side {
             1 => self
                 .bids
                 .iter()
-                .filter_map(|(order_id, order)| {
-                    if (order.price - trade_price).abs() <= 1e-9 {
-                        Some((*order_id, order.time_priority))
-                    } else {
-                        None
-                    }
-                })
+                .map(|(order_id, order)| (*order_id, order.price, order.time_priority))
                 .collect(),
             _ => self
                 .asks
                 .iter()
-                .filter_map(|(order_id, order)| {
-                    if (order.price - trade_price).abs() <= 1e-9 {
-                        Some((*order_id, order.time_priority))
-                    } else {
-                        None
-                    }
-                })
+                .map(|(order_id, order)| (*order_id, order.price, order.time_priority))
                 .collect(),
         };
 
-        candidates.sort_by_key(|(order_id, time_priority)| (*time_priority, *order_id));
+        match passive_side {
+            // Consume best bid first for sell aggressor.
+            1 => candidates.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.2.cmp(&b.2))
+                    .then_with(|| a.0.cmp(&b.0))
+            }),
+            // Consume best ask first for buy aggressor.
+            _ => candidates.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.2.cmp(&b.2))
+                    .then_with(|| a.0.cmp(&b.0))
+            }),
+        }
 
-        for (order_id, _) in candidates {
+        for (order_id, _, _) in candidates {
             if remaining <= 1e-9 {
                 break;
             }
