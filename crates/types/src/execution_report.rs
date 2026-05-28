@@ -7,6 +7,7 @@ pub struct ExecReportData {
     pub symbol: String,    // FIX field 55
     pub side: u8,          // FIX field 54 (1=Buy, 2=Sell)
     pub ord_status: u8,    // FIX field 39 (0=New, 1=PartialFill, 2=Fill, 3=DoneForDay, 4=Canceled)
+    pub is_aggressor: bool, // True for the incoming/taker order report; false for maker-side fills
     pub price: f64,        // FIX field 44
     pub qty: f64,          // FIX field 38
     pub leaves_qty: f64,   // FIX field 151

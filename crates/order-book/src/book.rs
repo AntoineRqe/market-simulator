@@ -472,6 +472,8 @@ impl OrderBook {
                 if let Err(_) = trades.add_trade(Trade {
                     price: best_bid.price,
                     cl_ord_id: best_bid.cl_ord_id,
+                    sender_id: best_bid.sender_id,
+                    target_id: best_bid.target_id,
                     quantity: trade_quantity,
                     id: self.generate_trade_id(),
                     order_qty: maker_qty_before,
@@ -536,6 +538,8 @@ impl OrderBook {
                 if let Err(_) = trades.add_trade(Trade {
                     price: best_ask.price,
                     cl_ord_id: best_ask.cl_ord_id,
+                    sender_id: best_ask.sender_id,
+                    target_id: best_ask.target_id,
                     quantity: trade_quantity,
                     id: self.generate_trade_id(),
                     order_qty: maker_qty_before,

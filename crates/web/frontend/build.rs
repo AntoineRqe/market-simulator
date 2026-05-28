@@ -2,23 +2,34 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
-    // Tell cargo to rerun if dist/index.html changes
-    let dist_path = Path::new("dist/index.html");
-    if dist_path.exists() {
-        println!("cargo:rerun-if-changed=dist/index.html");
-    }
+    println!("cargo:rerun-if-changed=index.html");
+    println!("cargo:rerun-if-changed=dist/index.html");
+    println!("cargo:rerun-if-changed=src/lib.rs");
 
-    // Check if built index.html exists in dist/
-    // If it does, we should use that. Otherwise, use the source index.html
     let dist_index = Path::new("dist/index.html");
     let source_index = Path::new("index.html");
 
-    if dist_index.exists() {
-        // Copy dist/index.html to root for lib.rs to include
-        if let Ok(content) = fs::read_to_string(dist_index) {
-            // index.html is already in root, lib.rs includes it
-        }
-    }
+    let app_html_source = if dist_index.exists() {
+        dist_index
+    } else {
+        source_index
+    };
 
-    println!("cargo:rerun-if-changed=src/lib.rs");
+    let app_html = fs::read_to_string(app_html_source).unwrap_or_else(|e| {
+        panic!(
+            "failed to read frontend HTML from '{}': {}",
+            app_html_source.display(),
+            e
+        )
+    });
+
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR must be set");
+    let out_path = Path::new(&out_dir).join("app.html");
+    fs::write(&out_path, app_html).unwrap_or_else(|e| {
+        panic!(
+            "failed to write generated frontend HTML to '{}': {}",
+            out_path.display(),
+            e
+        )
+    });
 }

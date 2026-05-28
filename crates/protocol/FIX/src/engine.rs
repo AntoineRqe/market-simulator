@@ -43,6 +43,7 @@ pub fn kill_fix_outbound_engine<const N: usize>(
             symbol: String::new(),
             side: 0,
             ord_status: 0,
+            is_aggressor: false,
             price: 0.0,
             qty: 0.0,
             leaves_qty: 0.0,

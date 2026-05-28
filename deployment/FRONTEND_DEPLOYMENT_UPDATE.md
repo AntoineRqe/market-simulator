@@ -112,12 +112,12 @@ Served by gateway at /app endpoint
    # Should show HTML with TypeScript app
    ```
 
-## Files to Update
+## Files Updated
 
-- [ ] `deployment/Dockerfile.gateway` - Add frontend build stage
-- [ ] `deployment/docker-compose.yml` - No changes needed (uses Dockerfile.gateway)
-- [ ] `.dockerignore` - Add frontend build artifacts
-- [ ] Build documentation
+- [x] `deployment/Dockerfile.gateway` - Multi-stage frontend build + assets path env
+- [x] `crates/web/backend/src/gateway.rs` - `/assets/*` static serving via `ServeDir`
+- [x] `deployment/FRONTEND_STATIC_SERVING.md` - Runtime asset serving strategy
+- [x] Build documentation
 
 ## Performance Impact
 
@@ -131,6 +131,7 @@ Served by gateway at /app endpoint
 - [ ] Frontend builds locally with `npm run build`
 - [ ] `dist/index.html` is generated
 - [ ] Gateway serves `/app` correctly
+- [ ] Gateway serves `/assets/index-*.js` correctly
 - [ ] WebSocket connects and receives messages
 - [ ] Order book updates display
 - [ ] Chart renders trades

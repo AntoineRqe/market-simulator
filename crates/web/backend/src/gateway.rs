@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::time::Duration;
+use tower_http::services::ServeDir;
 
 use crate::auth::MarketInfo;
 use axum::{
@@ -14,6 +16,28 @@ use axum::{
 #[derive(Clone)]
 struct LoginGatewayState {
     markets: Vec<MarketInfo>,
+}
+
+fn frontend_assets_dir() -> String {
+    if let Ok(dir) = std::env::var("FRONTEND_ASSETS_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    // Try Docker runtime first, then local development paths.
+    for candidate in [
+        "/app/frontend-dist/assets",
+        "/app/crates/web/frontend/dist/assets",
+        "crates/web/frontend/dist/assets",
+    ] {
+        if Path::new(candidate).exists() {
+            return candidate.to_string();
+        }
+    }
+
+    "crates/web/frontend/dist/assets".to_string()
 }
 
 fn client_market_url(market: &MarketInfo, headers: &HeaderMap) -> String {
@@ -44,11 +68,13 @@ pub fn run_login_gateway(markets: Vec<MarketInfo>, ip: &str, port: u16) {
         .expect("Failed to build tokio runtime for login gateway")
         .block_on(async move {
             let state = LoginGatewayState { markets };
+            let assets_dir = frontend_assets_dir();
             let app = Router::new()
                 .route("/", get(gateway_login_page_handler))
                 .route("/app", get(gateway_app_handler))
                 .route("/api/markets", get(gateway_markets_handler))
                 .route("/api/login", post(gateway_login_handler))
+                .nest_service("/assets", ServeDir::new(assets_dir.clone()))
                 .with_state(state);
 
             let addr: SocketAddr = format!("0.0.0.0:{port}")
@@ -60,6 +86,7 @@ pub fn run_login_gateway(markets: Vec<MarketInfo>, ip: &str, port: u16) {
                 .unwrap_or_else(|e| panic!("Cannot bind login gateway to port {port}: {e}"));
 
             tracing::info!("[gateway] Login page → http://{}:{}", ip, port);
+            tracing::info!("[gateway] Frontend assets served from '{}'", assets_dir);
 
             axum::serve(listener, app)
                 .await

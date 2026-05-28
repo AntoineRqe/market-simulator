@@ -3,7 +3,7 @@
 // ============================================================================
 
 import { getAuthToken, getUsername, getPassword, getMarketTokens } from './auth.js';
-import { getPrimaryMarketName, getOrCreateMarket, setMarketConnected, setMarketWebSocket } from './market.js';
+import { getPrimaryMarketName, getOrCreateMarket, setMarketConnected, setMarketWebSocket, getAllMarkets } from './market.js';
 import { getKnownMarkets, RECONNECT_BASE_MS, RECONNECT_MAX_MS, RECONNECT_JITTER_MS } from './constants.js';
 import { normalizeMarketName, nextReconnectDelay, now } from './utils.js';
 import { handleServerMessage, updateWsIndicator, logServerEvent } from './handlers.js';
@@ -22,11 +22,17 @@ const marketReconnectTimers: Record<string, ReturnType<typeof setTimeout> | null
 /**
  * Build WebSocket endpoint URL from base URL
  */
+function normalizeBasePath(pathname: string): string {
+  if (!pathname || pathname === '/') return '';
+  return pathname.replace(/\/+$/, '');
+}
+
 function buildWsEndpoint(baseUrl: string): string {
   try {
     const parsed = new URL(baseUrl);
     const protocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${protocol}//${parsed.host}${parsed.pathname || ''}/ws`;
+    const basePath = normalizeBasePath(parsed.pathname || '');
+    return `${protocol}//${parsed.host}${basePath}/ws`;
   } catch {
     return `ws://${baseUrl}/ws`;
   }
@@ -38,7 +44,9 @@ function buildWsEndpoint(baseUrl: string): string {
 function buildEndpoint(baseUrl: string, path: string): string {
   try {
     const url = new URL(baseUrl);
-    return `${url.protocol}//${url.host}${url.pathname || ''}${path}`;
+    const basePath = normalizeBasePath(url.pathname || '');
+    const endpointPath = path.startsWith('/') ? path : `/${path}`;
+    return `${url.protocol}//${url.host}${basePath}${endpointPath}`;
   } catch {
     return `http://${baseUrl}${path}`;
   }
@@ -397,7 +405,7 @@ export function disconnectAllMarkets(): void {
 
   resetPrimaryReconnect();
 
-  const markets = Object.values(getOrCreateMarket('')) as any[];
+  const markets = getAllMarkets();
   for (const market of markets) {
     if (market && market.ws) {
       market.ws.close();
@@ -405,38 +413,4 @@ export function disconnectAllMarkets(): void {
     }
     resetMarketReconnect(market.name);
   }
-}
-
-// ============================================================================
-// Event handlers (to be connected to business logic)
-// ============================================================================
-
-/**
- * Handle incoming server message (FIX, Market Data, Player State, etc.)
- * TODO: Connect to actual message processors
- */
-function handleServerMessage(msg: any, marketName: string): void {
-  console.log(`[${marketName}] Message:`, msg);
-  // TODO: Route to appropriate handler based on message type
-  // - FIX execution reports
-  // - Market data updates
-  // - Player state updates
-}
-
-/**
- * Log a server event
- * TODO: Connect to UI log display
- */
-function logServerEvent(event: any): void {
-  console.log(`[Log] ${event.label}: ${event.body}`);
-  // TODO: Append to log panel
-}
-
-/**
- * Update WebSocket indicator in UI
- * TODO: Connect to UI indicator
- */
-function updateWsIndicator(connected: boolean): void {
-  console.log(`[WS Indicator] ${connected ? 'Connected' : 'Disconnected'}`);
-  // TODO: Update status dot in UI
 }

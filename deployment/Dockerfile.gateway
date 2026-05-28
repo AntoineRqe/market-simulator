@@ -49,3 +49,4 @@ RUN chmod +x /app/bin/gateway /app/bin/market-simulator
 
 # Add /app/bin to PATH so binaries can be called directly
 ENV PATH="/app/bin:${PATH}"
+ENV FRONTEND_ASSETS_DIR="/app/frontend-dist/assets"

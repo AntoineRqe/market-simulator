@@ -61,11 +61,10 @@ COPY --from=frontend-builder /workspace/crates/web/frontend/dist/assets /app/ass
 
 ## Current Status
 
-✅ Frontend builds with Vite
-✅ TypeScript compiles without errors
-✅ dist/assets created with bundled JavaScript
-⏳ Need to add static file serving
-⏳ Need to update Docker build
+✅ Frontend builds with Vite  
+✅ Gateway serves `/assets/*` via `tower_http::services::ServeDir`  
+✅ Docker image exports `FRONTEND_ASSETS_DIR=/app/frontend-dist/assets`  
+✅ dist/assets bundled JavaScript is available at runtime
 
 ## Testing
 
@@ -82,7 +81,7 @@ curl http://localhost:9860/app
 # Should show HTML with <script src="/assets/index-*.js">
 
 curl http://localhost:9860/assets/index-*.js
-# Should return the JavaScript bundle
+# Should return the JavaScript bundle (200)
 ```
 
 ## Production Considerations
@@ -91,4 +90,3 @@ curl http://localhost:9860/assets/index-*.js
 2. **Compression**: Gzip .js files before upload (9.11KB → 3.57KB)
 3. **Caching**: Set long cache headers for versioned assets
 4. **Cleanup**: Remove old asset files when deploying new versions
-

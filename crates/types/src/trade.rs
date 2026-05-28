@@ -1,5 +1,5 @@
 use crate::arithmetic::FixedPointArithmetic;
-use crate::macros::OrderId;
+use crate::macros::{EntityId, OrderId};
 use std::ops::Index;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,6 +16,8 @@ pub struct Trade {
     pub quantity: FixedPointArithmetic,
     pub id: u64, // Trade ID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub cl_ord_id: OrderId,
+    pub sender_id: EntityId,
+    pub target_id: EntityId,
     pub order_qty: FixedPointArithmetic,
     pub leaves_qty: FixedPointArithmetic,
     pub timestamp: u64, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
@@ -28,6 +30,8 @@ impl Default for Trade {
             quantity: FixedPointArithmetic::ZERO,
             id: 0,
             cl_ord_id: OrderId::default(),
+            sender_id: EntityId::default(),
+            target_id: EntityId::default(),
             order_qty: FixedPointArithmetic::ZERO,
             leaves_qty: FixedPointArithmetic::ZERO,
             timestamp: SystemTime::now()
@@ -47,6 +51,8 @@ impl std::fmt::Display for Trade {
             \nquantity: {}
             \nid: {:?}
             \ncl_ord_id: {}
+            \nsender_id: {}
+            \ntarget_id: {}
             \norder_qty: {}
             \nleaves_qty: {}
             \ntimestamp: {}",
@@ -54,6 +60,8 @@ impl std::fmt::Display for Trade {
             self.quantity,
             self.id,
             self.cl_ord_id,
+            self.sender_id,
+            self.target_id,
             self.order_qty,
             self.leaves_qty,
             self.timestamp
@@ -76,6 +84,8 @@ impl<const N: usize> Default for Trades<N> {
                 quantity: FixedPointArithmetic::ZERO,
                 id: 0,
                 cl_ord_id: OrderId::default(),
+                sender_id: EntityId::default(),
+                target_id: EntityId::default(),
                 order_qty: FixedPointArithmetic::ZERO,
                 leaves_qty: FixedPointArithmetic::ZERO,
                 timestamp: SystemTime::now()

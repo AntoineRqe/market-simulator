@@ -146,6 +146,21 @@
     opacity:.4;
     cursor:not-allowed;
   }
+  .market-symbol-tabs{
+    display:flex;
+    flex-wrap:nowrap;
+    gap:6px;
+    padding:8px 8px 4px;
+    flex:0 0 auto;
+    align-items:center;
+    overflow-x:auto;
+  }
+  .market-symbol-tab{
+    flex:0 0 auto;
+    padding:4px 8px;
+    min-height:24px;
+    font-size:9px;
+  }
   button{font-family:'Courier New',monospace;cursor:pointer;border:none;outline:none}
   button:disabled{opacity:.4;cursor:not-allowed}
   .btn{display:block;width:calc(100% - 28px);margin:4px 14px;
@@ -400,6 +415,10 @@
     <div id="book-trades-section">
       <div id="trades-hdr">LAST TRADES</div>
       <div id="trades-list"></div>
+      <div id="chart-hdr"><span>PRICE CHART</span></div>
+      <div id="chart-wrap">
+        <canvas id="price-canvas"></canvas>
+      </div>
     </div>
   </div>
 </div>

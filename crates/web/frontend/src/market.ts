@@ -98,6 +98,9 @@ export function setActiveMarketSymbol(
   const bookState = ensureMarketBook(mn, nextSymbol);
   market.activeSymbol = nextSymbol;
   market.book = bookState || createMarketBook();
+  market.trades = (market.tradesBySymbol && market.tradesBySymbol[nextSymbol]) || [];
+  market.chartPoints =
+    (market.chartPointsBySymbol && market.chartPointsBySymbol[nextSymbol]) || [];
 
   return market.book;
 }
@@ -136,6 +139,10 @@ export function addMarket(marketName: string): any {
     books: { [initialSymbol]: initialBook },
     book: initialBook,
     activeSymbol: initialSymbol,
+    tradesBySymbol: {},
+    chartPointsBySymbol: {},
+    trades: [],
+    chartPoints: [],
     openOrders: {},
     openOrderFirstSeen: {},
     orderTimeouts: {},

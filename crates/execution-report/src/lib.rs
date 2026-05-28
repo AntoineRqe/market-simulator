@@ -3,7 +3,7 @@ use types::{macros::EntityId, ExecReportData, ExecutionReportMessage, OrderEvent
 
 use crossbeam_channel;
 use fix::tags::{
-    exec_type_code_set, msg_types, ord_status_code_set, side_code_set,
+    exec_type_code_set, last_liquidity_ind_code_set, msg_types, ord_status_code_set, side_code_set,
     tags::{self},
 };
 use spsc::spsc_lock_free::Producer;
@@ -75,6 +75,7 @@ impl<const N: usize> ExecutionReportEngine<N> {
             symbol: String::new(),
             side: 0,
             ord_status: 0,
+            is_aggressor: false,
             price: 0.0,
             qty: 0.0,
             leaves_qty: 0.0,
@@ -247,6 +248,12 @@ impl<const N: usize> ExecutionReportEngine<N> {
             &mut report,
             &mut cursor,
         ); // ExecType=PartiallyFilled
+        self.build_field(
+            tags::LAST_LIQUIDITY_IND,
+            last_liquidity_ind_code_set::REMOVED_LIQUIDITY,
+            &mut report,
+            &mut cursor,
+        );
 
         self.build_field(
             tags::ORDER_ID,
@@ -398,6 +405,12 @@ impl<const N: usize> ExecutionReportEngine<N> {
             &mut cursor,
         );
         self.build_field(
+            tags::LAST_LIQUIDITY_IND,
+            last_liquidity_ind_code_set::ADDED_LIQUIDITY,
+            &mut report,
+            &mut cursor,
+        );
+        self.build_field(
             tags::ORDER_ID,
             &trade.id.to_be_bytes(),
             &mut report,
@@ -440,13 +453,13 @@ impl<const N: usize> ExecutionReportEngine<N> {
 
         self.build_field(
             tags::SENDER_COMP_ID,
-            &order.target_id.as_ref(),
+            &trade.target_id.as_ref(),
             &mut report,
             &mut cursor,
         );
         self.build_field(
             tags::TARGET_COMP_ID,
-            &order.sender_id.as_ref(),
+            &trade.sender_id.as_ref(),
             &mut report,
             &mut cursor,
         );
@@ -519,6 +532,7 @@ impl<const N: usize> ExecutionReportEngine<N> {
             symbol: order_event.symbol.to_string(),
             side: Self::side_to_fix(order_event.side),
             ord_status: 0u8,
+            is_aggressor: true,
             price: order_event.price.to_f64(),
             qty: order_event.quantity.to_f64(),
             leaves_qty: order_event.quantity.to_f64(),
@@ -539,6 +553,7 @@ impl<const N: usize> ExecutionReportEngine<N> {
             symbol: order_event.symbol.to_string(),
             side: Self::side_to_fix(order_event.side),
             ord_status: if leaves_qty > 0.0 { 1u8 } else { 2u8 },
+            is_aggressor: true,
             price: order_event.price.to_f64(),
             qty: order_event.quantity.to_f64(),
             leaves_qty,
@@ -561,6 +576,7 @@ impl<const N: usize> ExecutionReportEngine<N> {
             } else {
                 2u8
             },
+            is_aggressor: false,
             price: trade.price.to_f64(),
             qty: trade.order_qty.to_f64(),
             leaves_qty: trade.leaves_qty.to_f64(),
@@ -589,6 +605,7 @@ impl<const N: usize> ExecutionReportEngine<N> {
             symbol: order_event.symbol.to_string(),
             side: Self::side_to_fix(order_event.side),
             ord_status,
+            is_aggressor: true,
             price: order_event.price.to_f64(),
             qty: order_event.quantity.to_f64(),
             leaves_qty: order_event.quantity.to_f64(),
@@ -611,7 +628,8 @@ impl<const N: usize> ExecutionReportEngine<N> {
     }
 
     fn process_execution_report(&self, exec_report: &(OrderEvent, OrderResult)) {
-        let mut reports: Vec<(FixRawMsg<N>, ExecReportData)> = vec![];
+        let mut reports: Vec<(EntityId, FixRawMsg<N>, ExecReportData)> = vec![];
+        let taker_key = exec_report.0.sender_id;
 
         match exec_report.1.status {
             types::OrderStatus::Unmatched => {
@@ -620,18 +638,21 @@ impl<const N: usize> ExecutionReportEngine<N> {
             }
             types::OrderStatus::Cancelled | types::OrderStatus::CancelRejected => {
                 reports.push((
+                    taker_key,
                     self.build_cancel_report(exec_report),
                     Self::exec_data_for_cancel(&exec_report.0, &exec_report.1),
                 ));
             }
             _ => {
                 reports.push((
+                    taker_key,
                     self.build_new_execution_report(exec_report),
                     Self::exec_data_for_new(&exec_report.0),
                 ));
 
                 if exec_report.1.trades.len() > 0 {
                     reports.push((
+                        taker_key,
                         self.build_execution_report(exec_report),
                         Self::exec_data_for_trade_report(&exec_report.0, &exec_report.1),
                     ));
@@ -644,6 +665,7 @@ impl<const N: usize> ExecutionReportEngine<N> {
                     for trade in exec_report.1.trades.iter() {
                         if trade.cl_ord_id != exec_report.0.cl_ord_id {
                             reports.push((
+                                trade.sender_id,
                                 self.build_execution_report_for_trade(
                                     &exec_report.0,
                                     trade,
@@ -657,8 +679,7 @@ impl<const N: usize> ExecutionReportEngine<N> {
             }
         }
 
-        let key = exec_report.0.sender_id;
-        for (report, exec_report_data) in reports.into_iter() {
+        for (key, report, exec_report_data) in reports.into_iter() {
             let msg = ExecutionReportMessage::new(report.len, report.data, exec_report_data);
             loop {
                 if let Err((_, _msg)) = self.fifo_out.push((key, msg.clone())) {

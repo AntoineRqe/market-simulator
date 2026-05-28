@@ -232,17 +232,36 @@ impl FIXSessionManager {
                                     samples.push(exec_elapsed_ms);
                                 }
 
-                                // Track trades: check ord_status for trade execution (1=PartialFill, 2=Fill)
-                                if exec_data.ord_status == 1 || exec_data.ord_status == 2 {
+                                // Publish trade tape only for aggressor (taker) exec reports.
+                                if exec_data.is_aggressor
+                                    && (exec_data.ord_status == 1 || exec_data.ord_status == 2)
+                                {
                                     metrics
                                         .trades
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+                                    let Some(trade_price) = parse_fix_tag_f64(&raw_msg, "31") else {
+                                        tracing::debug!(
+                                            "[{}] Skipping trade event: missing LastPx(31) for cl_ord_id={}",
+                                            market_name(),
+                                            exec_data.cl_ord_id
+                                        );
+                                        continue;
+                                    };
+                                    let Some(trade_qty) = parse_fix_tag_f64(&raw_msg, "32") else {
+                                        tracing::debug!(
+                                            "[{}] Skipping trade event: missing LastQty(32) for cl_ord_id={}",
+                                            market_name(),
+                                            exec_data.cl_ord_id
+                                        );
+                                        continue;
+                                    };
+
                                     let trade_view = TradeView {
                                         id: exec_data.order_id,
                                         symbol: exec_data.symbol.clone(),
-                                        price: exec_data.price,
-                                        quantity: exec_data.qty,
+                                        price: trade_price,
+                                        quantity: trade_qty,
                                         cl_ord_id: exec_data.cl_ord_id.clone(),
                                     };
                                     {
@@ -402,6 +421,19 @@ fn trim_fixed_decimal(value: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+fn parse_fix_tag_f64(raw: &[u8], tag: &str) -> Option<f64> {
+    raw.split(|b| *b == b'\x01').find_map(|field| {
+        let field = std::str::from_utf8(field).ok()?;
+        let (k, v) = field.split_once('=')?;
+        if k == tag {
+            let cleaned = v.trim_matches(char::from(0)).trim();
+            cleaned.parse::<f64>().ok()
+        } else {
+            None
+        }
+    })
 }
 
 /// Short label for a FIX message.

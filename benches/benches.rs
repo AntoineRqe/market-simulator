@@ -645,6 +645,7 @@ fn benchmark_latency_fix_outbound(iters: u64, histogram: &mut Histogram<u64>) ->
                 symbol: "EURUSD".to_string(),
                 side: 1,
                 ord_status: 2,
+                is_aggressor: true,
                 price: 1.23456,
                 qty: 1_000_000.0,
                 leaves_qty: 0.0,

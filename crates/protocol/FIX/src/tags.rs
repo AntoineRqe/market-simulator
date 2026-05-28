@@ -20,6 +20,7 @@ pub mod tags {
     pub const PRICE: u32 = 44;
     pub const LAST_QTY: u32 = 32;
     pub const LAST_PX: u32 = 31;
+    pub const LAST_LIQUIDITY_IND: u32 = 851;
     pub const CUM_QTY: u32 = 14;
     pub const LEAVES_QTY: u32 = 151;
     pub const HEARTBEAT_INT: u32 = 108;
@@ -110,4 +111,11 @@ pub mod exec_type_code_set {
     pub const TRIGGERED_OR_ACTIVATED_BY_SYSTEM: &[u8] = b"L";
     pub const LOCKED: &[u8] = b"M";
     pub const RELEASED: &[u8] = b"N";
+}
+
+pub mod last_liquidity_ind_code_set {
+    pub const ADDED_LIQUIDITY: &[u8] = b"1"; // maker/passive
+    pub const REMOVED_LIQUIDITY: &[u8] = b"2"; // taker/aggressor
+    pub const LIQUIDITY_ROUTED_OUT: &[u8] = b"3";
+    pub const AUCTION: &[u8] = b"4";
 }

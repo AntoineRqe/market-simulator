@@ -132,6 +132,23 @@ function updatePlayerDisplay(): void {
       : '';
     playerSpan.textContent = `${uiState.currentPlayer || 'Guest'}${suffix}`;
   }
+  updateAdminControls();
+}
+
+function updateAdminControls(): void {
+  const row = ge('admin-footer-row');
+  const isAdmin = uiState.currentIsAdmin;
+  if (row) {
+    row.style.display = isAdmin ? 'flex' : 'none';
+  }
+
+  const disable = !isAdmin;
+  const clearBook = ge('btn-clear-book') as HTMLButtonElement | null;
+  const resetSeq = ge('btn-reset-seq') as HTMLButtonElement | null;
+  const resetTokens = ge('btn-reset-tokens') as HTMLButtonElement | null;
+  if (clearBook) clearBook.disabled = disable;
+  if (resetSeq) resetSeq.disabled = disable;
+  if (resetTokens) resetTokens.disabled = disable;
 }
 
 /**
@@ -190,6 +207,15 @@ export function renderMarketTabs(): void {
   }
 
   const selected = getSelectedOrderMarketName();
+
+  const marketSelect = ge('o-market') as HTMLSelectElement | null;
+  if (marketSelect) {
+    marketSelect.innerHTML = options
+      .map((name) => `<option value="${esc(name)}">${esc(name)}</option>`)
+      .join('');
+    marketSelect.value = options.includes(selected) ? selected : options[0];
+  }
+
   host.innerHTML = options
     .map((name) => {
       const active = normalizeMarketName(name) === normalizeMarketName(selected);
@@ -218,6 +244,7 @@ export function selectOrderMarket(marketName: string): void {
   sel.value = nextMarket;
   renderMarketTabs();
   renderSymbolTabs();
+  renderSplitMarketCards();
   renderLog();
 }
 
@@ -231,6 +258,14 @@ export function renderSymbolTabs(): void {
   const marketName = getSelectedOrderMarketName();
   const symbols = getConfiguredSymbolsForMarket(marketName);
   const activeSymbol = getActiveMarketSymbol(marketName);
+
+  const symbolSelect = ge('o-sym') as HTMLSelectElement | null;
+  if (symbolSelect) {
+    symbolSelect.innerHTML = symbols
+      .map((symbol) => `<option value="${esc(symbol)}">${esc(symbol)}</option>`)
+      .join('');
+    symbolSelect.value = symbols.includes(activeSymbol) ? activeSymbol : symbols[0];
+  }
 
   if (symbols.length === 0) {
     host.innerHTML = '';
@@ -261,8 +296,23 @@ export function selectMarketSymbol(marketName: string, symbol: string): void {
   const nextSymbol = normalizeMarketName(symbol);
   if (!mn || !nextSymbol) return;
 
+  const marketNames = resolveSplitMarketConfigs()
+    .map((m) => normalizeMarketName(m.name || ''))
+    .filter(Boolean);
+
+  // Keep symbol selection globally synchronized across all visible markets.
+  marketNames.forEach((name) => {
+    const symbols = getConfiguredSymbolsForMarket(name);
+    if (symbols.includes(nextSymbol)) {
+      setActiveMarketSymbol(name, nextSymbol);
+    }
+  });
+
+  // Ensure the target market is updated even if config list is empty.
   setActiveMarketSymbol(mn, nextSymbol);
   renderSymbolTabs();
+  renderTradesPanel();
+  renderSplitMarketCards();
   renderLog();
 
   // Update order entry form
@@ -270,6 +320,141 @@ export function selectMarketSymbol(marketName: string, symbol: string): void {
   if (sel && sel.value !== nextSymbol) {
     sel.value = nextSymbol;
   }
+  applyDefaultLimitPriceFromBook(true);
+}
+
+function renderMarketBookLevels(levels: Array<{ price: number; quantity: number }>, sideClass: 'bid-lv' | 'ask-lv'): string {
+  if (!Array.isArray(levels) || levels.length === 0) {
+    return `<span style="color:var(--muted);font-size:10px;padding:4px 8px;display:block">${sideClass === 'bid-lv' ? 'No bids' : 'No asks'}</span>`;
+  }
+
+  return levels
+    .slice(0, 8)
+    .map((level) => {
+      const qty = Number(level.quantity || 0);
+      const pct = qty > 0 ? Math.min(100, (qty / 1000) * 100) : 0;
+      return `<div class="bk-level ${sideClass}">
+        <div class="bar" style="width:${pct}%"></div>
+        <span class="lv-maker">MKT</span>
+        <span class="lv-qty"><span class="lv-qty-num">${fmtNum(qty)}</span></span>
+        <span class="lv-px">${fmt2(Number(level.price || 0))}</span>
+      </div>`;
+    })
+    .join('');
+}
+
+function renderMarketChartSvg(points: Array<{ price: number }>): string {
+  if (!Array.isArray(points) || points.length < 2) {
+    return `<svg viewBox="0 0 400 72" preserveAspectRatio="none"><line x1="0" y1="36" x2="400" y2="36" stroke="var(--border)" stroke-width="1" /></svg>`;
+  }
+
+  const recent = points.slice(-40);
+  const prices = recent.map((p) => Number(p.price || 0)).filter((p) => Number.isFinite(p));
+  if (prices.length < 2) {
+    return `<svg viewBox="0 0 400 72" preserveAspectRatio="none"><line x1="0" y1="36" x2="400" y2="36" stroke="var(--border)" stroke-width="1" /></svg>`;
+  }
+
+  const minP = Math.min(...prices);
+  const maxP = Math.max(...prices);
+  const span = Math.max(0.0001, maxP - minP);
+
+  const path = prices
+    .map((price, idx) => {
+      const x = (idx / Math.max(1, prices.length - 1)) * 400;
+      const y = 66 - ((price - minP) / span) * 58;
+      return `${idx === 0 ? 'M' : 'L'}${x.toFixed(2)} ${y.toFixed(2)}`;
+    })
+    .join(' ');
+
+  return `<svg viewBox="0 0 400 72" preserveAspectRatio="none">
+    <path d="${path}" fill="none" stroke="var(--green)" stroke-width="2" />
+    <line x1="0" y1="66" x2="400" y2="66" stroke="var(--border)" stroke-width="1" />
+  </svg>`;
+}
+
+export function renderSplitMarketCards(): void {
+  const container = ge('markets-container');
+  if (!container) return;
+
+  const marketNames = resolveSplitMarketConfigs()
+    .map((m) => normalizeMarketName(m.name || ''))
+    .filter(Boolean);
+
+  if (marketNames.length === 0) {
+    container.innerHTML = '';
+    return;
+  }
+
+  container.style.display = 'grid';
+  const colBook = ge('col-book');
+  if (colBook) colBook.style.display = 'none';
+
+  container.innerHTML = marketNames
+    .map((marketName) => {
+      const market = getOrCreateMarket(marketName);
+      const activeSymbol = getActiveMarketSymbol(marketName);
+      const book = (market.books && market.books[activeSymbol]) || market.book;
+      const bids = (book && Array.isArray(book.bid)) ? book.bid : [];
+      const asks = (book && Array.isArray(book.ask)) ? book.ask : [];
+      const trades = Array.isArray(market.trades) ? market.trades.slice(-5).reverse() : [];
+      const chartPoints = Array.isArray(market.chartPoints) ? market.chartPoints : [];
+      const symbols = getConfiguredSymbolsForMarket(marketName);
+      const lastTrade = trades.length > 0 ? trades[0] : null;
+
+      return `<div class="market-card" data-market="${esc(marketName)}">
+        <div class="market-card-header">
+          <h3>${esc(marketName)}</h3>
+          <span class="market-subtitle">${esc(activeSymbol)} • last: ${lastTrade ? fmt2(Number(lastTrade.price || 0)) : '—'}</span>
+        </div>
+        <div class="market-book">
+          <div class="market-book-layout">
+            <div class="market-book-section">
+              <div class="market-symbol-tabs">
+                ${symbols
+                  .map((symbol) => `<button type="button" class="symbol-tab market-symbol-tab ${normalizeMarketName(symbol) === normalizeMarketName(activeSymbol) ? 'active' : ''}" data-market-symbol="${esc(marketName)}|${esc(symbol)}">${esc(symbol)}</button>`)
+                  .join('')}
+              </div>
+              <div class="book-cols compact"><span class="col-maker">MAKER</span><span class="col-qty">QTY</span><span class="col-px">PRICE</span></div>
+              <div class="market-levels">
+                <div>${renderMarketBookLevels(asks, 'ask-lv')}</div>
+                <div id="spread-row">spread: —</div>
+                <div>${renderMarketBookLevels(bids, 'bid-lv')}</div>
+              </div>
+            </div>
+            <div class="market-chart">
+              <div class="market-chart-title">PRICE CHART</div>
+              ${renderMarketChartSvg(chartPoints)}
+            </div>
+            <div class="market-trades-section">
+              <div id="trades-hdr">TRADES</div>
+              <div class="market-trades-list">
+                ${trades.length === 0
+                  ? '<span style="color:var(--muted);font-size:10px;padding:2px 8px;display:block">No trades</span>'
+                  : trades
+                      .map((trade) => `<div class="tr-row ${Number(trade.quantity || 0) >= 0 ? 'tr-buy' : 'tr-sell'}">
+                        <span class="td">${Number(trade.quantity || 0) >= 0 ? 'B' : 'S'}</span>
+                        <span class="tp">${fmt2(Number(trade.price || 0))}</span>
+                        <span class="tq">${fmtNum(Math.abs(Number(trade.quantity || 0)))}</span>
+                        <span class="tt">${new Date(Number(trade.timestamp || Date.now())).toLocaleTimeString()}</span>
+                      </div>`)
+                      .join('')}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="market-controls"><span style="font-size:10px;color:${market.connected ? 'var(--green)' : 'var(--muted)'}">● ${market.connected ? 'CONNECTED' : 'DISCONNECTED'}</span></div>
+      </div>`;
+    })
+    .join('');
+
+  container.querySelectorAll('button[data-market-symbol]').forEach((btn) => {
+    const marketBtn = btn as HTMLButtonElement;
+    marketBtn.onclick = () => {
+      const [marketName, symbol] = String(marketBtn.dataset.marketSymbol || '').split('|');
+      if (!marketName || !symbol) return;
+      selectMarketSymbol(marketName, symbol);
+    };
+  });
 }
 
 /**
@@ -294,11 +479,8 @@ export function renderOrderBook(immediate: boolean = false): void {
 function performOrderBookRender(): void {
   orderBookRenderTimer = null;
 
-  const bookContainer = ge('order-book-container');
-  if (!bookContainer) return;
-
-  const bidsContainer = ge('bids-list');
-  const asksContainer = ge('asks-list');
+  const bidsContainer = ge('bids-list') || ge('bids');
+  const asksContainer = ge('asks-list') || ge('asks');
   if (!bidsContainer || !asksContainer) return;
 
   // Get current market and book
@@ -311,6 +493,10 @@ function performOrderBookRender(): void {
   }
 
   const book = market.book;
+  const bookSym = ge('book-sym');
+  if (bookSym) {
+    bookSym.innerHTML = `ORDER BOOK &nbsp;&#8212; ${esc(book.symbol || '')}`;
+  }
 
   // Render bids (green, highest prices first)
   if (book.bid && book.bid.length > 0) {
@@ -318,9 +504,11 @@ function performOrderBookRender(): void {
       .slice(0, 10) // Show top 10 levels
       .map(level => {
         const pct = level.quantity > 0 ? Math.min(100, (level.quantity / 1000) * 100) : 0;
-        return `<div class="book-level bid" style="--pct:${pct}%">
-          <span class="qty">${fmtNum(level.quantity)}</span>
-          <span class="price">${fmt2(level.price)}</span>
+        return `<div class="bk-level bid-lv">
+          <div class="bar" style="width:${pct}%"></div>
+          <span class="lv-maker">MKT</span>
+          <span class="lv-qty"><span class="lv-qty-num">${fmtNum(level.quantity)}</span></span>
+          <span class="lv-px">${fmt2(level.price)}</span>
         </div>`;
       })
       .join('');
@@ -334,15 +522,27 @@ function performOrderBookRender(): void {
       .slice(0, 10) // Show top 10 levels
       .map(level => {
         const pct = level.quantity > 0 ? Math.min(100, (level.quantity / 1000) * 100) : 0;
-        return `<div class="book-level ask" style="--pct:${pct}%">
-          <span class="qty">${fmtNum(level.quantity)}</span>
-          <span class="price">${fmt2(level.price)}</span>
+        return `<div class="bk-level ask-lv">
+          <div class="bar" style="width:${pct}%"></div>
+          <span class="lv-maker">MKT</span>
+          <span class="lv-qty"><span class="lv-qty-num">${fmtNum(level.quantity)}</span></span>
+          <span class="lv-px">${fmt2(level.price)}</span>
         </div>`;
       })
       .join('');
   } else {
     asksContainer.innerHTML = '<span style="color:var(--muted);font-size:10px">No asks</span>';
   }
+
+  const bookLast = ge('book-last');
+  if (bookLast) {
+    const bestBid = book.bid && book.bid.length > 0 ? Number(book.bid[0].price || 0) : 0;
+    const bestAsk = book.ask && book.ask.length > 0 ? Number(book.ask[0].price || 0) : 0;
+    const mid = bestBid > 0 && bestAsk > 0 ? (bestBid + bestAsk) / 2 : (bestBid || bestAsk || 0);
+    bookLast.innerHTML = `last: ${mid > 0 ? fmt2(mid) : '&#8212;'}`;
+  }
+
+  applyDefaultLimitPriceFromBook(true);
 }
 
 /**
@@ -398,9 +598,22 @@ function performOrdersRender(_orders: Order[] | null = null): void {
           <span class="px">@ ${fmt2(order.price)}</span>
         </div>
         <div class="order-status">${order.status}</div>
+        <button type="button" class="order-cancel" data-clord-id="${esc(clordId)}">×</button>
       </div>`;
     })
     .join('');
+
+  list.querySelectorAll('button.order-cancel[data-clord-id]').forEach((btn) => {
+    const cancelBtn = btn as HTMLButtonElement;
+    cancelBtn.onclick = () => {
+      const clOrdId = String(cancelBtn.dataset.clordId || '').trim();
+      if (!clOrdId) return;
+      const cancelFn = (window as any).cancelOrder;
+      if (typeof cancelFn === 'function') {
+        cancelFn(clOrdId);
+      }
+    };
+  });
 
   renderHoldings();
 }
@@ -486,6 +699,12 @@ export function appendLog(entry: { ts: string; label: string; body: string; tag:
   renderLog();
 }
 
+export function clearAllLogsEntries(): void {
+  logEntries.length = 0;
+  Object.keys(recentLogTimestamps).forEach((k) => delete recentLogTimestamps[k]);
+  renderLog();
+}
+
 /**
  * Merge client orders with order book
  * Used for reconciliation after connection
@@ -496,8 +715,15 @@ export function mergeClientOpenOrdersFromBook(
 ): void {
   const mn = normalizeMarketName(marketName);
   const sym = normalizeMarketName(symbol);
-  console.log(`[UI] Merging orders from book: ${mn}/${sym}`);
-  // TODO: Implement order reconciliation
+  const market = getOrCreateMarket(mn);
+  if (!market || !market.book || normalizeMarketName(market.book.symbol) !== sym) return;
+
+  // If a pending order no longer appears in current UI symbol context, keep it;
+  // removal is driven by player_state / execution reports, not book snapshots.
+  // This hook is still useful to refresh visible order-related surfaces.
+  renderOrderBook(true);
+  renderSplitMarketCards();
+  console.log(`[UI] Reconciled order surfaces from book: ${mn}/${sym}`);
 }
 
 /**
@@ -554,17 +780,28 @@ export function renderTradesPanel(): void {
     return;
   }
 
-  list.innerHTML = market.trades
-    .slice(-20) // Show last 20 trades
+  const recentTrades = market.trades
+    .slice(-5) // Show last 5 trades
     .reverse() // Most recent first
     .map(trade => {
-      return `<div class="trade-row">
-        <span class="trade-price">${fmt2(trade.price)}</span>
-        <span class="trade-qty">${fmtNum(trade.quantity)}</span>
-        <span class="trade-time">${new Date(trade.timestamp).toLocaleTimeString()}</span>
+      const sideClass = Number(trade.quantity || 0) >= 0 ? 'tr-buy' : 'tr-sell';
+      return `<div class="tr-row ${sideClass}">
+        <span class="td">${Number(trade.quantity || 0) >= 0 ? 'B' : 'S'}</span>
+        <span class="to">MKT</span>
+        <span class="tp">${fmt2(trade.price)}</span>
+        <span class="tq">${fmtNum(Math.abs(Number(trade.quantity || 0)))}</span>
+        <span class="tt">${new Date(trade.timestamp).toLocaleTimeString()}</span>
       </div>`;
     })
     .join('');
+
+  list.innerHTML = recentTrades;
+
+  const lastTrade = market.trades[market.trades.length - 1];
+  const bookLast = ge('book-last');
+  if (bookLast && lastTrade && Number(lastTrade.price || 0) > 0) {
+    bookLast.innerHTML = `last: ${fmt2(lastTrade.price)}`;
+  }
 
   // Render chart with trade points
   if (market.chartPoints && market.chartPoints.length > 0) {
@@ -593,6 +830,58 @@ export function renderOrderCostPreview(): void {
     el.textContent = '—';
     el.style.color = 'var(--muted)';
   }
+}
+
+/**
+ * Default order price from top of book:
+ * BUY -> best ask, SELL -> best bid.
+ * When force=false, only applies if current price is empty/invalid.
+ */
+export function applyDefaultLimitPriceFromBook(force: boolean = false): void {
+  const priceInput = ge('o-price') as HTMLInputElement | null;
+  if (!priceInput) return;
+
+  const currentPrice = Number(priceInput.value || 0);
+  if (!force && Number.isFinite(currentPrice) && currentPrice > 0) {
+    return;
+  }
+
+  const marketName = getSelectedOrderMarketName();
+  const market = getOrCreateMarket(marketName);
+  if (!market) return;
+
+  const symbolSelect = ge('o-sym') as HTMLSelectElement | null;
+  const activeSymbol = normalizeMarketName(
+    symbolSelect?.value || getActiveMarketSymbol(marketName)
+  );
+  if (!activeSymbol) return;
+
+  const book = (market.books && market.books[activeSymbol]) || market.book;
+  if (!book) return;
+
+  const bestBid = Array.isArray(book.bid) && book.bid.length > 0
+    ? Math.max(...book.bid.map((l: any) => Number(l?.price || 0)).filter((p: number) => Number.isFinite(p) && p > 0))
+    : 0;
+  const bestAsk = Array.isArray(book.ask) && book.ask.length > 0
+    ? Math.min(...book.ask.map((l: any) => Number(l?.price || 0)).filter((p: number) => Number.isFinite(p) && p > 0))
+    : 0;
+
+  const nextPrice = getTradingSide() === 'BUY' ? bestAsk : bestBid;
+  if (!Number.isFinite(nextPrice) || nextPrice <= 0) return;
+
+  const priceRange = ge('o-price-range') as HTMLInputElement | null;
+  if (priceRange) {
+    const min = Number(priceRange.min || 0);
+    const max = Number(priceRange.max || Number.MAX_SAFE_INTEGER);
+    const clamped = Math.min(max, Math.max(min, nextPrice));
+    priceInput.value = String(clamped);
+    priceRange.value = String(clamped);
+  } else {
+    priceInput.value = String(nextPrice);
+  }
+
+  priceInput.dispatchEvent(new Event('input', { bubbles: true }));
+  renderOrderCostPreview();
 }
 
 /**

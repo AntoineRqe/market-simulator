@@ -7,6 +7,7 @@ import { getPrimaryMarketName, getOrCreateMarket, setActiveMarketSymbol } from '
 import {
   updatePlayerState,
   updateTokenBalance,
+  currentHoldings,
   getCurrentHoldings,
   getOrderOwners,
   getOpenOrders,
@@ -15,6 +16,8 @@ import {
   getTerminalStatusForOrder,
   setTerminalStatusForOrder,
   renderOrders,
+  renderOrderBook,
+  renderSplitMarketCards,
   renderHoldings,
   renderTradesPanel,
   appendLog,
@@ -75,6 +78,7 @@ function handleStatusMessage(msg: any, marketName: string): void {
   market.connected = connected;
 
   updateWsIndicator(connected);
+  renderSplitMarketCards();
   logServerEvent({
     ts: now(),
     label: connected ? 'CONNECTED' : 'DISCONNECTED',
@@ -144,11 +148,20 @@ function applyPlayerStateUpdate(msg: any): void {
 
   // Update holdings
   const holdings = msg && typeof msg.holdings === 'object' && msg.holdings ? msg.holdings : {};
+  Object.keys(currentHoldings).forEach((symbol) => {
+    delete currentHoldings[symbol];
+  });
   Object.keys(holdings).forEach(symbol => {
     const normalizedSymbol = String(symbol || '').trim().toUpperCase();
     const holding = holdings[symbol] || {};
     const qty = Number(holding.quantity || 0);
-    const avgPrice = Number(holding.avg_price || 0);
+    const avgPrice = Number(holding.avg_price ?? holding.avgPrice ?? 0);
+    if (normalizedSymbol) {
+      currentHoldings[normalizedSymbol] = {
+        quantity: qty,
+        avgPrice,
+      };
+    }
     if (normalizedSymbol && qty > 0) {
       console.log(`[Holdings] ${normalizedSymbol}: ${qty} @ ${avgPrice}`);
     }
@@ -247,12 +260,18 @@ function handleOrderBookMessage(msg: any, marketName: string): void {
   };
 
   // Store in market state
+  if (!market.books) {
+    market.books = {};
+  }
+  market.books[symbol] = bookState;
   market.book = bookState;
 
   if (!market.activeSymbol) {
     setActiveMarketSymbol(mn, symbol);
   }
 
+  renderOrderBook();
+  renderSplitMarketCards();
   console.log('[Book] Merged client orders from book snapshot');
 }
 
@@ -316,36 +335,46 @@ function handleTradesMessage(msg: any, marketName: string): void {
     });
   });
 
-  // Update market trades and chart
+  if (!market.tradesBySymbol) {
+    market.tradesBySymbol = {};
+  }
+  if (!market.chartPointsBySymbol) {
+    market.chartPointsBySymbol = {};
+  }
+
+  // Update per-symbol trade and chart data
   Object.keys(bySymbol).forEach(symbol => {
-    market.trades = bySymbol[symbol];
-    updateChartPoints(market, bySymbol[symbol]);
+    const existing = Array.isArray(market.tradesBySymbol[symbol])
+      ? market.tradesBySymbol[symbol]
+      : [];
+    const merged = [...existing, ...bySymbol[symbol]].slice(-100);
+    market.tradesBySymbol[symbol] = merged;
+    updateChartPoints(market, symbol, merged);
   });
+
+  const activeSymbol = normalizeMarketName(
+    market.activeSymbol || msg.symbol || Object.keys(bySymbol)[0] || ''
+  );
+  market.trades = market.tradesBySymbol[activeSymbol] || [];
+  market.chartPoints = market.chartPointsBySymbol[activeSymbol] || [];
 
   console.log('[UI] Rendered trades panel');
   renderTradesPanel();
+  renderSplitMarketCards();
 }
 
 /**
  * Update chart points from trades
  */
-function updateChartPoints(market: any, trades: Trade[]): void {
-  if (!market.chartPoints) {
-    market.chartPoints = [];
+function updateChartPoints(market: any, symbol: string, trades: Trade[]): void {
+  if (!market.chartPointsBySymbol) {
+    market.chartPointsBySymbol = {};
   }
-
-  trades.forEach(trade => {
-    market.chartPoints.push({
-      price: trade.price,
-      quantity: trade.quantity,
-      timestamp: trade.timestamp,
-    });
-  });
-
-  // Keep last 100 points
-  if (market.chartPoints.length > 100) {
-    market.chartPoints = market.chartPoints.slice(-100);
-  }
+  market.chartPointsBySymbol[symbol] = (trades || []).slice(-100).map((trade) => ({
+    price: trade.price,
+    quantity: trade.quantity,
+    timestamp: trade.timestamp,
+  }));
 }
 
 /**
@@ -459,6 +488,8 @@ function resetClientMarketView(marketName: string): void {
   market.orders = [];
   market.trades = [];
   market.chartPoints = [];
+  market.tradesBySymbol = {};
+  market.chartPointsBySymbol = {};
 
   logServerEvent({
     ts: now(),
@@ -472,11 +503,17 @@ function resetClientMarketView(marketName: string): void {
  * Update WebSocket indicator
  */
 export function updateWsIndicator(connected: boolean): void {
-  const dot = document.getElementById('status-dot');
-  if (!dot) return;
+  const statusDot = document.getElementById('status-dot');
+  if (statusDot) {
+    statusDot.textContent = connected ? '● CONNECTED' : '● DISCONNECTED';
+    statusDot.className = connected ? 'on' : '';
+  }
 
-  dot.textContent = connected ? '● CONNECTED' : '● DISCONNECTED';
-  dot.className = connected ? 'on' : '';
+  const wsDot = document.getElementById('ws-dot');
+  if (wsDot) {
+    wsDot.textContent = connected ? '● WS' : '● WS';
+    wsDot.className = connected ? 'on' : '';
+  }
 
   // Show/hide stale data badge
   const staleBadges = document.querySelectorAll('[class*="stale-badge"]');
