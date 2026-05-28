@@ -1,7 +1,29 @@
-# Build gateway and market-simulator binaries from pre-built release artifacts
-# Prerequisites: Must run build-release.sh before Docker build
-#   ./build-release.sh
+# Multi-stage build: Build frontend, then Rust binaries, then runtime
+#
+# Stage 1: Build TypeScript frontend with Vite
+FROM node:22-alpine as frontend-builder
+WORKDIR /workspace
 
+# Copy frontend source and dependencies
+COPY crates/web/frontend/package.json crates/web/frontend/package-lock.json crates/web/frontend/
+RUN cd crates/web/frontend && npm ci --prefer-offline --no-audit
+
+# Copy frontend code
+COPY crates/web/frontend/src crates/web/frontend/src
+COPY crates/web/frontend/index.html crates/web/frontend/tsconfig.json crates/web/frontend/tsconfig.node.json crates/web/frontend/vite.config.ts crates/web/frontend/
+
+# Build frontend
+RUN cd crates/web/frontend && npm run build
+
+# Stage 2: Build Rust binaries (if not pre-built)
+# Uncomment if you want to build Rust in Docker instead of locally
+# FROM rust:latest as rust-builder
+# WORKDIR /workspace
+# COPY . .
+# COPY --from=frontend-builder /workspace/crates/web/frontend/dist/index.html /workspace/crates/web/frontend/index.html
+# RUN cargo build --release --bin gateway --bin market-simulator
+
+# Stage 3: Runtime image
 FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y \
@@ -9,14 +31,18 @@ RUN apt-get update && apt-get install -y \
     libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy pre-built gateway and market-simulator binaries to /app/bin
+WORKDIR /app
+
+# Copy pre-built gateway and market-simulator binaries
+# These should be built locally with: cargo build --release --bin gateway --bin market-simulator
 COPY target/release/gateway /app/bin/gateway
 COPY target/release/market-simulator /app/bin/market-simulator
 
+# Copy built frontend from builder stage
+COPY --from=frontend-builder /workspace/crates/web/frontend/dist /app/frontend-dist
+
 # Copy configuration files
 COPY crates/config /app/crates/config
-
-WORKDIR /app
 
 # Make binaries executable
 RUN chmod +x /app/bin/gateway /app/bin/market-simulator
