@@ -5,10 +5,10 @@ edition = "2024"
 
 [dependencies]
 tracing.workspace = true
-spsc.workspace = true
+spsc = { path = "../spsc" }
 logging = { path = "../logging" }
 types = { path = "../types" }
-utils = { path = "../utils" } 
+utils = { path = "../utils" }
 crossbeam-channel.workspace = true
 
 [dev-dependencies]

@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-spsc.workspace = true
 itoa = "1.0.17"
 logging = { path = "../logging" }
 order-book = { path = "../order-book" }
 fix = { path = "../protocol/FIX" }
 utils = { path = "../utils" }
 types = { path = "../types" }
+spsc = { path = "../spsc" }
 tracing.workspace = true
 crossbeam-channel.workspace = true

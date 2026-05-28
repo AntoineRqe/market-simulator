@@ -1,0 +1,1 @@
+{"rustc":6107691804261878361,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[449643779184587696,"build_script_build",false,15972281459167234206]],"local":[{"RerunIfChanged":{"output":"release/build/grpc-5b5da8cb6b83f1c8/output","paths":["proto/market_control.proto","proto"]}}],"rustflags":[],"config":0,"compile_kind":0}

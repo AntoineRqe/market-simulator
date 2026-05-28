@@ -1,0 +1,48 @@
+[package]
+name = "spsc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+core_affinity = "0.8.3"
+
+
+[[bench]]
+name = "spsc"
+harness = false
+path = "benches/spsc.rs"
+
+
+[dev-dependencies]
+crossbeam.workspace = true
+crossbeam-utils.workspace = true
+criterion.workspace = true
+hdrhistogram.workspace = true
+lazy_static.workspace = true
+
+
+[profile.profiling]
+inherits = "release"
+codegen-units = 16
+debug = true
+strip = false
+
+
+[features]
+default = ["cache-padding"]
+cache-padding = []
+
+
+[[example]]
+name = "profile_aligned"
+required-features = ["cache-padding"]
+path = "examples/profile_aligned.rs"
+
+
+[[example]]
+name = "profile_unaligned"
+path = "examples/profile_unaligned.rs"
+
+[[example]]
+name = "profile_lock"
+path = "examples/profile_lock.rs"

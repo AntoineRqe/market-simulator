@@ -201,6 +201,8 @@ Technical choices and discussion about the architecture and design of the simula
 
 Use Docker Compose from the `market-simulator` directory (compose file is in `deployment/`):
 
+Warning: Make sure you have nightly Rust installed and set as default before running the build script, as it may use features not available in stable.
+
 ```bash
 # 1) Build release binaries used by Docker images
 ./build-release.sh

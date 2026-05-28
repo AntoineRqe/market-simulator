@@ -1,0 +1,557 @@
+use std::cell::UnsafeCell;
+use std::marker::PhantomData;
+use std::mem::MaybeUninit;
+use std::sync::atomic::{AtomicUsize, Ordering, fence};
+use std::thread::Thread;
+use std::time::{Duration, Instant};
+// use std::thread;
+
+#[cfg(feature = "cache-padding")]
+#[repr(align(64))]
+pub struct CachePadded<T>(T);
+
+#[cfg(not(feature = "cache-padding"))]
+pub struct CachePadded<T>(T);
+
+#[cfg(feature = "cache-padding")]
+#[repr(align(64))]
+pub struct AlignedBuffer<T, const N: usize>([MaybeUninit<T>; N]);
+
+#[cfg(not(feature = "cache-padding"))]
+pub struct AlignedBuffer<T, const N: usize>([MaybeUninit<T>; N]);
+
+#[repr(align(64))]
+pub struct RingBuffer<T, const N: usize> {
+    pub head: CachePadded<AtomicUsize>,
+    pub tail: CachePadded<AtomicUsize>,
+    buffer: UnsafeCell<AlignedBuffer<T, N>>, // Circular buffer storage, Make the whole buffer UnsafeCell to allow interior mutability
+    consumer_thread: std::sync::OnceLock<Thread>, // Store the consumer thread handle to allow for better synchronization in push when buffer is full, by yielding to the consumer thread
+}
+
+/// Split the RingBuffer into a Producer and Consumer. The Producer can only push items, and the Consumer can only pop items.
+/// This allows for safe concurrent access from separate threads without needing to use Arc or other synchronization primitives.
+pub struct Producer<'a, T, const N: usize> {
+    rb: &'a RingBuffer<T, N>,
+}
+
+pub struct Consumer<'a, T, const N: usize> {
+    rb: &'a RingBuffer<T, N>,
+    _not_sync: PhantomData<std::cell::UnsafeCell<()>>, // !Sync but Send
+}
+
+// Safety: The RingBuffer can be safely sent between threads as long as T is Send
+unsafe impl<T: Send, const N: usize> Send for RingBuffer<T, N> {}
+// Safety: The RingBuffer can be safely shared between threads as long as T is Send
+unsafe impl<T: Send, const N: usize> Sync for RingBuffer<T, N> {}
+
+// Need to properly drop any remaining items in the buffer when RingBuffer is dropped
+impl<T, const N: usize> Drop for RingBuffer<T, N> {
+    fn drop(&mut self) {
+        let head = self.head.0.load(Ordering::Relaxed);
+        let mut tail = self.tail.0.load(Ordering::Relaxed);
+        while head != tail {
+            unsafe {
+                self.buffer
+                    .get()
+                    .as_mut()
+                    .unwrap()
+                    .0
+                    .get_unchecked_mut(tail)
+                    .assume_init_drop();
+            }
+            tail = (tail + 1) & (N - 1); // Bitwise mask because N is power of 2
+        }
+    }
+}
+
+impl<'a, T, const N: usize> Producer<'a, T, N> {
+    /// Pushes an item into the ring buffer and wakes up the consumer thread if it was sleeping, to improve latency when buffer is full.
+    /// Returns Err(item) if the buffer is full.            while let Some(_) = ss_consumer.try_pop() {
+    pub fn push(&self, item: T) -> Result<(), T> {
+        match self.rb.push(item) {
+            Ok(()) => {
+                // Wake up the consumer thread if it was sleeping which could be possibly sleeping is queue is empty.
+                if let Some(consumer_thread) = self.rb.consumer_thread.get() {
+                    consumer_thread.unpark();
+                }
+                Ok(())
+            }
+            Err(item) => Err(item),
+        }
+    }
+
+    /// Pushes an item into the ring buffer.
+    /// Returns Err(item) if the buffer is full.
+    pub fn try_push(&self, item: T) -> Result<(), T> {
+        self.rb.push(item)
+    }
+
+    pub fn push_batch(&self, items: &[T]) -> usize
+    where
+        T: Copy,
+    {
+        self.rb.push_batch(items)
+    }
+
+    pub fn len(&self) -> usize {
+        self.rb.len()
+    }
+}
+
+impl<'a, T, const N: usize> Consumer<'a, T, N> {
+    /// Pops an item from the ring buffer. If the buffer is empty, it will return None immediately without blocking.
+    pub fn try_pop(&self) -> Option<T> {
+        self.rb.pop()
+    }
+
+    /// Pops an item from the ring buffer. If the buffer is empty, it will block until an item is available.
+    pub fn pop(&self) -> Option<T> {
+        // First pop operation, store the consumer thread handle to allow for better synchronization in push when buffer is full.
+        self.rb
+            .consumer_thread
+            .get_or_init(|| std::thread::current());
+
+        loop {
+            match self.rb.pop() {
+                Some(item) => return Some(item),
+                None => {
+                    std::thread::park(); // Block the current thread until it is unparked
+                }
+            }
+        }
+    }
+
+    pub fn pop_timeout(&self, timeout: Duration) -> Option<T> {
+        self.rb.pop_timeout(timeout)
+    }
+
+    pub fn pop_batch(&self, items: &mut [T]) -> usize
+    where
+        T: Copy,
+    {
+        self.rb.pop_batch(items)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rb.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.rb.len()
+    }
+}
+
+const SPIN_THRESHOLD: usize = 256;
+
+impl<T, const N: usize> RingBuffer<T, N> {
+    /// Creates a new RingBuffer with the specified capacity N.
+    /// N must be a power of 2.
+    pub fn new() -> Self {
+        assert!(N.is_power_of_two(), "N must be a power of 2");
+
+        let buffer: UnsafeCell<AlignedBuffer<T, N>> =
+            UnsafeCell::new(unsafe { MaybeUninit::uninit().assume_init() });
+
+        Self {
+            buffer,
+            head: CachePadded(AtomicUsize::new(0)),
+            tail: CachePadded(AtomicUsize::new(0)),
+            consumer_thread: std::sync::OnceLock::new(),
+        }
+    }
+
+    pub unsafe fn init(ptr: *mut Self) {
+        unsafe {
+            ptr.write(Self::new());
+        }
+    }
+
+    pub fn split<'a>(&'a mut self) -> (Producer<'a, T, N>, Consumer<'a, T, N>) {
+        *self = Self::new(); // Reset head and tail to 0, ensure buffer is empty
+        (
+            Producer { rb: self },
+            Consumer {
+                rb: self,
+                _not_sync: PhantomData, // !Sync but Send
+            },
+        )
+    }
+
+    /// Pushes an item into the ring buffer.
+    /// Returns Err(item) if the buffer is full.
+    pub fn push(&self, item: T) -> Result<(), T> {
+        let head = self.head.0.load(Ordering::Relaxed); // Relaxed is safe here because only the consumer modifies head
+        let next_head = (head + 1) & (N - 1); // Bitwise mask because N is power of 2
+
+        let tail_relaxed = self.tail.0.load(Ordering::Relaxed); // Acquire to synchronize with consumer
+
+        if next_head != tail_relaxed {
+            fence(Ordering::Acquire);
+            // Space available, fast path
+            unsafe {
+                *self
+                    .buffer
+                    .get()
+                    .as_mut()
+                    .unwrap()
+                    .0
+                    .get_unchecked_mut(head) = MaybeUninit::new(item);
+            }
+
+            self.head.0.store(next_head, Ordering::Release);
+            return Ok(());
+        }
+
+        let mut tail = self.tail.0.load(Ordering::Acquire); // Acquire to synchronize with consumer
+
+        if next_head == tail {
+            // Buffer is full
+            let mut spin = 1;
+
+            loop {
+                for _ in 0..spin {
+                    std::hint::spin_loop();
+                }
+
+                tail = self.tail.0.load(Ordering::Acquire); // Acquire to synchronize with consumer
+
+                if next_head != tail {
+                    // Space available
+                    break;
+                }
+
+                if spin < SPIN_THRESHOLD {
+                    spin *= 2; // backoff
+                } else {
+                    return Err(item);
+                }
+            }
+        }
+
+        unsafe {
+            *self
+                .buffer
+                .get()
+                .as_mut()
+                .unwrap()
+                .0
+                .get_unchecked_mut(head) = MaybeUninit::new(item);
+        }
+
+        self.head.0.store(next_head, Ordering::Release);
+        Ok(())
+    }
+
+    /// Pops an item from the ring buffer.
+    /// Returns None if the buffer is empty.
+    pub fn pop(&self) -> Option<T> {
+        let relaxed_head = self.head.0.load(Ordering::Relaxed); // Acquire to synchronize with producer
+        let tail = self.tail.0.load(Ordering::Relaxed); // Relaxed is safe here because only the consumer modifies tail
+
+        if relaxed_head != tail {
+            fence(Ordering::Acquire);
+            // Data available, fast path
+            let item = unsafe {
+                self.buffer
+                    .get()
+                    .as_mut()
+                    .unwrap()
+                    .0
+                    .get_unchecked_mut(tail)
+                    .as_ptr()
+                    .read()
+            };
+
+            let next_tail = (tail + 1) & (N - 1); // Bitwise mask because N is power of 2
+            self.tail.0.store(next_tail, Ordering::Release);
+
+            return Some(item);
+        }
+
+        let mut head = self.head.0.load(Ordering::Acquire); // Acquire to synchronize with producer
+        if head == tail {
+            let mut spin = 1;
+
+            loop {
+                for _ in 0..spin {
+                    std::hint::spin_loop();
+                }
+
+                head = self.head.0.load(Ordering::Acquire); // Acquire to synchronize with producer
+
+                if head != tail {
+                    // Data available
+                    break;
+                }
+
+                if spin < SPIN_THRESHOLD {
+                    spin *= 2; // backoff
+                } else {
+                    return None;
+                }
+            }
+        }
+
+        // Synchronize with producer to ensure we see the latest data, improve atomic load performance when buffer is not empty
+        //fence(Ordering::Acquire);
+
+        let item = unsafe {
+            self.buffer
+                .get()
+                .as_mut()
+                .unwrap()
+                .0
+                .get_unchecked_mut(tail)
+                .as_ptr()
+                .read()
+        };
+
+        let next_tail = (tail + 1) & (N - 1); // Bitwise mask because N is power of 2
+        self.tail.0.store(next_tail, Ordering::Release);
+        Some(item)
+    }
+
+    /// Pushes a batch of items into the ring buffer.
+    /// Returns the number of items successfully pushed.
+    pub fn push_batch(&self, items: &[T]) -> usize
+    where
+        T: Copy,
+    {
+        let mut pushed = 0;
+
+        let mut head = self.head.0.load(Ordering::Relaxed); // Relaxed is safe here because only the consumer modifies head
+        let tail = self.tail.0.load(Ordering::Acquire); // Acquire to synchronize with consumer
+
+        for &item in items {
+            let next_head = (head + 1) & (N - 1); // Bitwise mask because N is power of 2
+
+            if next_head == tail {
+                // Buffer is full
+                break;
+            }
+
+            // Synchronize with consumer to ensure we see the latest data, improve atomic load performance when buffer is not full
+            //fence(Ordering::Acquire);
+
+            unsafe {
+                *self
+                    .buffer
+                    .get()
+                    .as_mut()
+                    .unwrap()
+                    .0
+                    .get_unchecked_mut(head) = MaybeUninit::new(item);
+            }
+
+            head = next_head;
+            pushed += 1;
+        }
+
+        self.head.0.store(head, Ordering::Release);
+
+        pushed
+    }
+
+    pub fn pop_timeout(&self, timeout: Duration) -> Option<T> {
+        // Fast path — mirrors your existing pop() fast path exactly
+        let relaxed_head = self.head.0.load(Ordering::Relaxed);
+        let tail = self.tail.0.load(Ordering::Relaxed);
+
+        if relaxed_head != tail {
+            fence(Ordering::Acquire);
+            let item = unsafe {
+                self.buffer
+                    .get()
+                    .as_mut()
+                    .unwrap()
+                    .0
+                    .get_unchecked_mut(tail)
+                    .as_ptr()
+                    .read()
+            };
+            let next_tail = (tail + 1) & (N - 1);
+            self.tail.0.store(next_tail, Ordering::Release);
+            return Some(item);
+        }
+
+        // Register consumer thread so producer can unpark us on push
+        let consumer_thread = std::thread::current();
+        self.consumer_thread.get_or_init(|| consumer_thread);
+
+        // Slow path — use park_timeout for efficient waiting instead of busy spinning
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            let head = self.head.0.load(Ordering::Acquire);
+            let tail = self.tail.0.load(Ordering::Relaxed);
+
+            if head != tail {
+                // Data available, consume it
+                fence(Ordering::Acquire);
+                let item = unsafe {
+                    self.buffer
+                        .get()
+                        .as_mut()
+                        .unwrap()
+                        .0
+                        .get_unchecked_mut(tail)
+                        .as_ptr()
+                        .read()
+                };
+                let next_tail = (tail + 1) & (N - 1);
+                self.tail.0.store(next_tail, Ordering::Release);
+                return Some(item);
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                return None;
+            }
+
+            let remaining = deadline - now;
+            std::thread::park_timeout(remaining);
+        }
+    }
+
+    pub fn pop_batch(&self, items: &mut [T]) -> usize
+    where
+        T: Copy,
+    {
+        let mut popped = 0;
+
+        let head = self.head.0.load(Ordering::Relaxed);
+        let mut tail = self.tail.0.load(Ordering::Acquire);
+
+        while head != tail && popped < items.len() {
+            // Synchronize with producer to ensure we see the latest data, improve atomic load performance when buffer is not empty
+            //fence(Ordering::Acquire);
+
+            items[popped] = unsafe {
+                self.buffer
+                    .get()
+                    .as_mut()
+                    .unwrap()
+                    .0
+                    .get_unchecked_mut(tail)
+                    .as_ptr()
+                    .read()
+            };
+
+            tail = (tail + 1) & (N - 1); // Bitwise mask because N is power of 2
+            popped += 1;
+        }
+
+        self.tail.0.store(tail, Ordering::Release);
+        popped
+    }
+
+    /// Checks if the ring buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        let head = self.head.0.load(Ordering::Acquire);
+        let tail = self.tail.0.load(Ordering::Relaxed);
+        head == tail
+    }
+
+    /// Checks if the ring buffer is full.
+    pub fn is_full(&self) -> bool {
+        let head = self.head.0.load(Ordering::Relaxed);
+        let tail = self.tail.0.load(Ordering::Acquire);
+        let next_tail = (tail + 1) & (N - 1); // Bitwise mask because N is power of 2
+        next_tail == head
+    }
+
+    /// Returns the current number of items in the ring buffer.
+    pub fn len(&self) -> usize {
+        let head = self.head.0.load(Ordering::Acquire);
+        let tail = self.tail.0.load(Ordering::Relaxed);
+        (head + N - tail) & (N - 1) // Bitwise mask because N is power of 2
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RingBuffer;
+
+    #[test]
+    fn it_works() {
+        let _rb: RingBuffer<u8, 1024> = RingBuffer::new();
+    }
+
+    #[test]
+    fn push_and_pop() {
+        let mut rb: RingBuffer<u8, 4> = RingBuffer::new();
+        let (producer, consumer) = rb.split();
+        assert_eq!(producer.push(1), Ok(()));
+        assert_eq!(producer.push(2), Ok(()));
+        assert_eq!(producer.push(3), Ok(()));
+        assert_eq!(producer.push(4), Err(4)); // Buffer should be full
+        assert_eq!(consumer.pop(), Some(1));
+        assert_eq!(consumer.pop(), Some(2));
+        assert_eq!(producer.push(4), Ok(()));
+        assert_eq!(consumer.pop(), Some(3));
+        assert_eq!(consumer.pop(), Some(4));
+        assert_eq!(consumer.pop(), None); // Buffer should be empty
+    }
+
+    #[test]
+    fn spsc_blocking() {
+        use std::thread;
+
+        let mut rb = RingBuffer::<usize, 1024>::new();
+
+        thread::scope(|s| {
+            let (producer, consumer) = rb.split();
+
+            let prod = s.spawn(move || {
+                for i in 0..1_000_000 {
+                    loop {
+                        if producer.push(i).is_ok() {
+                            break;
+                        }
+                    }
+                }
+            });
+
+            let mut expected = 0;
+            while expected < 1_000_000 {
+                if let Some(v) = consumer.pop() {
+                    assert_eq!(v, expected);
+                    expected += 1;
+                }
+            }
+
+            prod.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn spsc_non_blocking() {
+        use std::thread;
+
+        let mut rb = RingBuffer::<usize, 1024>::new();
+
+        thread::scope(|s| {
+            let (producer, consumer) = rb.split();
+
+            let prod = s.spawn(move || {
+                for i in 0..1_000_000 {
+                    loop {
+                        if producer.try_push(i).is_ok() {
+                            break;
+                        }
+                    }
+                }
+            });
+
+            let mut expected = 0;
+            while expected < 1_000_000 {
+                if let Some(v) = consumer.try_pop() {
+                    assert_eq!(v, expected);
+                    expected += 1;
+                }
+            }
+
+            prod.join().unwrap();
+        });
+    }
+}

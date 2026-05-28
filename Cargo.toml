@@ -18,6 +18,7 @@ members = [
     "crates/market-feed",
     "crates/snapshot",
     "crates/proxy",
+    "crates/spsc",
 ]
 
 # Shared dependencies across all crates
@@ -27,9 +28,9 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2"
 criterion = "0.8.2"
 hdrhistogram = "7.0"
-spsc = { path = "../spsc" }
 crossbeam = "0.8.2"
 crossbeam-channel = "0.5.15"
+crossbeam-utils = "0.8.4"
 lazy_static = "1.4.0"
 tokio    = { version = "1", features = ["full"] }
 serde    = { version = "1", features = ["derive"] }
@@ -65,9 +66,10 @@ market-feed = { path = "crates/market-feed" }
 snapshot = { path = "crates/snapshot" }
 utils = { path = "crates/utils" }
 proxy = { path = "crates/proxy" }
+spsc = { path = "crates/spsc" }
 crossbeam.workspace = true
+crossbeam-utils.workspace = true
 crossbeam-channel.workspace = true
-spsc.workspace = true
 core_affinity = "0.8.3"
 ctrlc = "3.2.0"
 tokio = { version = "1", features = ["full"] }

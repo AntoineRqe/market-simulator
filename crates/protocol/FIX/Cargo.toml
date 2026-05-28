@@ -8,7 +8,7 @@ order-book = { path = "../../order-book" }
 memory = { path = "../../memory" }
 utils = { path = "../../utils" }
 types = { path = "../../types" }
-spsc.workspace = true
+spsc = { path = "../../spsc" }
 crossbeam.workspace = true
 crossbeam-channel.workspace = true
 serde.workspace = true

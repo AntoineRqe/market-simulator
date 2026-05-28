@@ -7,7 +7,7 @@ edition = "2024"
 sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio-native-tls"] }
 tokio = { version = "1", features = ["full"] }
 dotenvy = "0.15"  # Optional: to read .env file for DB URL
-spsc.workspace = true
+spsc = { path = "../spsc" }
 # itoa = "1.0.17"
 # logging = { path = "../logging" }
 # order-book = { path = "../order-book" }
