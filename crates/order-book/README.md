@@ -75,6 +75,35 @@ Name                 │   p50 (ns) │   p99 (ns) │  p999 (ns) │   vs base
 ────────────────────────────────────────────────────────────────────────
 Order Book           │       1052 │       1994 │       4319 │      1.00x
 
+### Perf scenarios without Criterion overhead
+
+Use harness-free perf tests in `tests/perf/` to profile specific scenarios directly:
+
+- `perf_order_creation`
+- `perf_order_deletion`
+- `perf_order_deletion_with_depth`
+
+Run one scenario:
+
+```bash
+cargo test -p order-book --test perf_order_creation --release
+```
+
+Override iterations (`PERF_ITERS` or first arg after `--`):
+
+```bash
+PERF_ITERS=1000000 cargo test -p order-book --test perf_order_deletion --release
+cargo test -p order-book --test perf_order_deletion_with_depth --release -- 1000000
+```
+
+Generate flamegraph (with `cargo-flamegraph` installed):
+
+```bash
+cargo flamegraph -p order-book --test perf_order_creation --release
+cargo flamegraph -p order-book --test perf_order_deletion --release
+cargo flamegraph -p order-book --test perf_order_deletion_with_depth --release
+```
+
 
 ## TODO List
 

@@ -97,14 +97,14 @@ fn run_latency_create(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
     assert!(get_cores().len() >= 2, "Need at least 2 CPU cores.");
 
     let mut rb_rx = RingBuffer::<OrderEvent, RB_SIZE>::new();
-    let mut rb_tx = RingBuffer::<(OrderEvent, OrderResult), RB_SIZE>::new();
     let mut ts_rb = RingBuffer::<u64, RB_SIZE>::new();
 
     let start = Instant::now();
 
     thread::scope(|s| {
         let (inbound_tx, inbound_rx) = rb_rx.split();
-        let (outbound_tx, outbound_rx) = rb_tx.split();
+        let (outbound_tx, outbound_rx) =
+            crossbeam::channel::unbounded::<(OrderEvent, OrderResult)>();
         let (ts_tx, ts_rx) = ts_rb.split();
 
         let inbound_tx = Arc::new(inbound_tx);
@@ -114,7 +114,7 @@ fn run_latency_create(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
         let order_book = order_book::book::OrderBook::new("TEST".into());
         let mut engine = OrderBookEngine::new(
             inbound_rx,
-            Some(outbound_tx),
+            Some(Arc::new(outbound_tx)),
             None,
             None,
             control_rx.1,
@@ -173,7 +173,7 @@ fn run_latency_create(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
                 std::hint::spin_loop();
             };
             loop {
-                if outbound_rx.try_pop().is_some() {
+                if outbound_rx.try_recv().is_ok() {
                     break;
                 }
                 std::hint::spin_loop();
@@ -204,14 +204,14 @@ fn run_latency_delete(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
     assert!(get_cores().len() >= 2, "Need at least 2 CPU cores.");
 
     let mut rb_rx = RingBuffer::<OrderEvent, RB_SIZE>::new();
-    let mut rb_tx = RingBuffer::<(OrderEvent, OrderResult), RB_SIZE>::new();
     let mut ts_rb = RingBuffer::<u64, RB_SIZE>::new();
 
     let start = Instant::now();
 
     thread::scope(|s| {
         let (inbound_tx, inbound_rx) = rb_rx.split();
-        let (outbound_tx, outbound_rx) = rb_tx.split();
+        let (outbound_tx, outbound_rx) =
+            crossbeam::channel::unbounded::<(OrderEvent, OrderResult)>();
         let (ts_tx, ts_rx) = ts_rb.split();
 
         let inbound_tx = Arc::new(inbound_tx);
@@ -221,7 +221,7 @@ fn run_latency_delete(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
         let order_book = order_book::book::OrderBook::new("TEST".into());
         let mut engine = OrderBookEngine::new(
             inbound_rx,
-            Some(outbound_tx),
+            Some(Arc::new(outbound_tx)),
             None,
             None,
             control_rx.1,
@@ -300,7 +300,7 @@ fn run_latency_delete(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
         core_affinity::set_for_current(consumer_core);
         for _ in 0..iters {
             loop {
-                if outbound_rx.try_pop().is_some() {
+                if outbound_rx.try_recv().is_ok() {
                     break;
                 }
                 std::hint::spin_loop();
@@ -314,7 +314,7 @@ fn run_latency_delete(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
                 std::hint::spin_loop();
             };
             loop {
-                if outbound_rx.try_pop().is_some() {
+                if outbound_rx.try_recv().is_ok() {
                     break;
                 }
                 std::hint::spin_loop();
@@ -343,14 +343,14 @@ fn run_latency_delete_with_depth(iters: u64, histogram: &mut Histogram<u64>) -> 
     assert!(get_cores().len() >= 2, "Need at least 2 CPU cores.");
 
     let mut rb_rx = RingBuffer::<OrderEvent, RB_SIZE>::new();
-    let mut rb_tx = RingBuffer::<(OrderEvent, OrderResult), RB_SIZE>::new();
     let mut ts_rb = RingBuffer::<u64, RB_SIZE>::new();
 
     let start = Instant::now();
 
     thread::scope(|s| {
         let (inbound_tx, inbound_rx) = rb_rx.split();
-        let (outbound_tx, outbound_rx) = rb_tx.split();
+        let (outbound_tx, outbound_rx) =
+            crossbeam_channel::unbounded::<(OrderEvent, OrderResult)>();
         let (ts_tx, ts_rx) = ts_rb.split();
 
         let inbound_tx = Arc::new(inbound_tx);
@@ -360,7 +360,7 @@ fn run_latency_delete_with_depth(iters: u64, histogram: &mut Histogram<u64>) -> 
         let order_book = order_book::book::OrderBook::new("TEST".into());
         let mut engine = OrderBookEngine::new(
             inbound_rx,
-            Some(outbound_tx),
+            Some(Arc::new(outbound_tx)),
             None,
             None,
             control_rx.1,
@@ -438,7 +438,7 @@ fn run_latency_delete_with_depth(iters: u64, histogram: &mut Histogram<u64>) -> 
         const BOOK_SIZE: u64 = 10000;
         for _ in 0..BOOK_SIZE {
             loop {
-                if outbound_rx.try_pop().is_some() {
+                if outbound_rx.try_recv().is_ok() {
                     break;
                 }
                 std::hint::spin_loop();
@@ -456,8 +456,9 @@ fn run_latency_delete_with_depth(iters: u64, histogram: &mut Histogram<u64>) -> 
 
             // Consume cancel ack
             loop {
-                if outbound_rx.try_pop().is_some() {
+                if outbound_rx.try_recv().is_ok() {
                     break;
+                    some
                 }
                 std::hint::spin_loop();
             }
@@ -486,14 +487,14 @@ fn run_throughput(iters: u64) -> Duration {
     assert!(get_cores().len() >= 2, "Need at least 2 CPU cores.");
 
     let mut rb_rx = RingBuffer::<OrderEvent, RB_SIZE>::new();
-    let mut rb_tx = RingBuffer::<(OrderEvent, OrderResult), RB_SIZE>::new();
 
     let start = Instant::now();
     let mut measured_elapsed = Duration::ZERO;
 
     thread::scope(|s| {
         let (inbound_tx, inbound_rx) = rb_rx.split();
-        let (outbound_tx, outbound_rx) = rb_tx.split();
+        let (outbound_tx, outbound_rx) =
+            crossbeam_channel::unbounded::<(OrderEvent, OrderResult)>();
 
         let inbound_tx = Arc::new(inbound_tx);
         let inbound_tx_clone = Arc::clone(&inbound_tx);
@@ -502,7 +503,7 @@ fn run_throughput(iters: u64) -> Duration {
         let order_book = order_book::book::OrderBook::new("TEST".into());
         let mut engine = OrderBookEngine::new(
             inbound_rx,
-            Some(outbound_tx),
+            Some(Arc::new(outbound_tx)),
             None,
             None,
             control_rx.1,
@@ -535,7 +536,7 @@ fn run_throughput(iters: u64) -> Duration {
         core_affinity::set_for_current(consumer_core);
         for _ in 0..iters {
             loop {
-                if outbound_rx.try_pop().is_some() {
+                if outbound_rx.try_recv().is_ok() {
                     break;
                 }
                 std::hint::spin_loop();

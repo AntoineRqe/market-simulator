@@ -1,1 +1,0 @@
-{"rustc":16696009966390864400,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[3947697605537580541,"build_script_build",false,16047671158310249594]],"local":[{"RerunIfChanged":{"output":"release/build/frontend-d88bf6aefcf399fc/output","paths":["index.html","dist/index.html","src/lib.rs"]}}],"rustflags":[],"config":0,"compile_kind":0}

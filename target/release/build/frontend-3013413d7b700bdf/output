@@ -1,3 +1,0 @@
-cargo:rerun-if-changed=index.html
-cargo:rerun-if-changed=dist/index.html
-cargo:rerun-if-changed=src/lib.rs

@@ -1,1 +1,0 @@
-cargo:rustc-env=MIME_TYPES_GENERATED_PATH=/home/antoine/market-simulator/target/release/build/mime_guess-660894bbc0ddbf55/out/mime_types_generated.rs

@@ -26,3 +26,23 @@ lazy_static.workspace = true
 name = "ob_bench"
 harness = false
 path = "bench/bench.rs"
+
+[[test]]
+name = "perf_order_creation"
+harness = false
+path = "tests/perf/order_creation.rs"
+
+[[test]]
+name = "perf_order_deletion"
+harness = false
+path = "tests/perf/order_deletion.rs"
+
+[[test]]
+name = "perf_order_deletion_with_depth"
+harness = false
+path = "tests/perf/order_deletion_with_depth.rs"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false

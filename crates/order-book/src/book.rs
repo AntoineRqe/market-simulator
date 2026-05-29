@@ -139,6 +139,7 @@ impl OrderBook {
             .expect("order node missing from arena")
     }
 
+    // TODO : instead of popping from the free list and pushing back to the nodes vector, we can maintain a linked list of free nodes within the nodes vector itself to avoid fragmentation and improve cache locality.
     fn alloc_node(&mut self, order: OrderEvent) -> NodeId {
         let node = Node {
             order,
@@ -155,6 +156,7 @@ impl OrderBook {
         }
     }
 
+    // TODO: This function is called multiple times during order matching, we can optimize it by caching the best price for each side and only updating it when the best price level is modified.
     fn best_price(&self, side: Side) -> Option<FixedPointArithmetic> {
         match side {
             Side::Buy => self.bids.last_key_value().map(|(&price, _)| price),

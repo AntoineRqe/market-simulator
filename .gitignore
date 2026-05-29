@@ -1,7 +1,10 @@
 **/logs
 **.pem
 *.lock
+*lock.json
 players.json
 __pycache__/
 target/
 node_modules/
+*.svg
+**.old
