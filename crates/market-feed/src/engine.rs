@@ -88,8 +88,7 @@ impl<'a, const N: usize> MarketDataFeedEngine<'a, N> {
         order_result: &OrderResult,
     ) -> Vec<Trade> {
         order_result
-            .trades
-            .iter()
+            .trades_iter()
             .map(|trade| Trade::from_trade(&order_event.cl_ord_id, order_event.side, trade))
             .collect()
     }
@@ -133,7 +132,7 @@ impl<'a, const N: usize> MarketDataFeedEngine<'a, N> {
         }
 
         if order_result.status == types::OrderStatus::PartiallyFilled
-            && order_result.trades.len() == 0
+            && order_result.trades_len() == 0
         {
             let modify_order = self.build_modify_order_event(order_event, order_result);
             let header = self.build_header(order_event, MessageType::ModifyOrder, 68);
@@ -146,7 +145,7 @@ impl<'a, const N: usize> MarketDataFeedEngine<'a, N> {
             events.push(MarketEvent::Trade(header, trade));
         }
 
-        let traded_qty = order_result.trades.quantity_sum();
+        let traded_qty = order_result.traded_qty();
         let remaining_qty = if traded_qty >= order_event.quantity {
             types::FixedPointArithmetic::ZERO
         } else {
@@ -506,7 +505,7 @@ mod tests {
 
         let order_result = OrderResult {
             internal_order_id: 0,
-            trades,
+            trades: Some(trades),
             status: types::OrderStatus::PartiallyFilled,
             ..Default::default()
         };
@@ -546,7 +545,7 @@ mod tests {
 
         let order_result = OrderResult {
             internal_order_id: 777888,
-            trades: types::Trades::default(),
+            trades: None,
             status: types::OrderStatus::Filled,
             ..Default::default()
         };
@@ -659,7 +658,7 @@ mod tests {
 
         let order_result = OrderResult {
             internal_order_id: 888999,
-            trades,
+            trades: Some(trades),
             status: types::OrderStatus::Filled,
             ..Default::default()
         };

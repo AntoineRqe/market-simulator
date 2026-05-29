@@ -8,3 +8,5 @@ target/
 node_modules/
 *.svg
 **.old
+**/target*
+perf.data

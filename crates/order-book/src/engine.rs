@@ -221,7 +221,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
                         }
                     }
                     _ => {
-                        for trade in order_result.trades.iter() {
+                        for trade in order_result.trades_iter() {
                             if trade.quantity == types::FixedPointArithmetic::ZERO {
                                 continue;
                             }
@@ -242,7 +242,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
                             }
                         }
 
-                        let traded_quantity = order_result.trades.quantity_sum();
+                        let traded_quantity = order_result.traded_qty();
                         let leaves_qty = if event.quantity > traded_quantity {
                             event.quantity - traded_quantity
                         } else {
@@ -425,7 +425,7 @@ mod tests {
                 .expect("expected first outbound execution report");
 
             assert!(order_event.price == FixedPointArithmetic::from_f64(100.0));
-            assert!(order_result.trades.len() == 0);
+            assert!(order_result.trades_len() == 0);
 
             assert!(order_result.status == OrderStatus::New);
 
@@ -451,7 +451,7 @@ mod tests {
                 .expect("expected second outbound execution report");
 
             assert!(order_event2.price == FixedPointArithmetic::from_f64(100.0));
-            assert!(order_result2.trades.len() == 1); // One trade should be executed for the matching orders
+            assert!(order_result2.trades_len() == 1); // One trade should be executed for the matching orders
             assert!(order_result2.status == OrderStatus::New); // Both orders should be filled
 
             // Send a dummy order to unblock the engine if it's waiting for orders
@@ -535,7 +535,7 @@ mod tests {
         engine.incremental_update(
             taker_buy,
             OrderResult {
-                trades,
+                trades: Some(trades),
                 status: OrderStatus::PartiallyFilled,
                 timestamp_ms: 2,
                 ..Default::default()
@@ -682,7 +682,7 @@ mod tests {
         engine.incremental_update(
             taker_sell,
             OrderResult {
-                trades,
+                trades: Some(trades),
                 status: OrderStatus::PartiallyFilled,
                 timestamp_ms: 11,
                 ..Default::default()

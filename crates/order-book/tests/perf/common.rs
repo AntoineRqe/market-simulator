@@ -5,6 +5,9 @@ use types::macros::{EntityId, OrderId, SymbolId};
 use types::{FixedPointArithmetic, OrderEvent, OrderType, Side};
 
 pub const DEFAULT_ITERS: u64 = 200_000;
+const PERF_SENDER_ID: EntityId = EntityId::from_ascii("SENDER");
+const PERF_TARGET_ID: EntityId = EntityId::from_ascii("TARGET");
+const PERF_SYMBOL_ID: SymbolId = SymbolId::from_ascii("TEST");
 
 pub fn scenario_iters() -> u64 {
     std::env::var("PERF_ITERS")
@@ -26,9 +29,9 @@ pub fn limit_order(order_id: OrderId, side: Side, price_raw: i64, qty_raw: i64) 
         side,
         price: FixedPointArithmetic(price_raw),
         quantity: FixedPointArithmetic(qty_raw),
-        sender_id: EntityId::from_ascii("SENDER"),
-        target_id: EntityId::from_ascii("TARGET"),
-        symbol: SymbolId::from_ascii("TEST"),
+        sender_id: PERF_SENDER_ID,
+        target_id: PERF_TARGET_ID,
+        symbol: PERF_SYMBOL_ID,
         timestamp_ms: 0,
     }
 }
@@ -41,9 +44,9 @@ pub fn cancel_order(cancel_id: OrderId, orig_id: OrderId, side: Side) -> OrderEv
         side,
         price: FixedPointArithmetic::ZERO,
         quantity: FixedPointArithmetic::ZERO,
-        sender_id: EntityId::from_ascii("SENDER"),
-        target_id: EntityId::from_ascii("TARGET"),
-        symbol: SymbolId::from_ascii("TEST"),
+        sender_id: PERF_SENDER_ID,
+        target_id: PERF_TARGET_ID,
+        symbol: PERF_SYMBOL_ID,
         timestamp_ms: 0,
     }
 }

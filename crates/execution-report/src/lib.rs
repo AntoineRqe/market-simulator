@@ -222,7 +222,7 @@ impl<const N: usize> ExecutionReportEngine<N> {
             &mut cursor,
         );
 
-        let traded_qty = order_result.trades.quantity_sum();
+        let traded_qty = order_result.traded_qty();
         let remaining_qty = order.quantity - traded_qty;
 
         if remaining_qty > FixedPointArithmetic::ZERO {
@@ -328,10 +328,10 @@ impl<const N: usize> ExecutionReportEngine<N> {
             &mut cursor,
         );
 
-        if order_result.trades.len() > 0 {
+        if let Some(first_trade) = order_result.first_trade() {
             self.build_field(
                 tags::LAST_PX,
-                &order_result.trades[0].price.to_fix_bytes(),
+                &first_trade.price.to_fix_bytes(),
                 &mut report,
                 &mut cursor,
             );
@@ -343,7 +343,7 @@ impl<const N: usize> ExecutionReportEngine<N> {
             );
             self.build_field(
                 tags::AVG_PX,
-                &order_result.trades.avg_price().to_fix_bytes(),
+                &order_result.avg_trade_price().to_fix_bytes(),
                 &mut report,
                 &mut cursor,
             );
@@ -544,7 +544,7 @@ impl<const N: usize> ExecutionReportEngine<N> {
         order_result: &OrderResult,
     ) -> ExecReportData {
         let cl_ord_id = order_event.cl_ord_id.to_string();
-        let traded_qty = order_result.trades.quantity_sum();
+        let traded_qty = order_result.traded_qty();
         let leaves_qty = (order_event.quantity - traded_qty).to_f64().max(0.0);
         ExecReportData {
             order_id: Self::stable_order_id_from_cl_ord_id(&cl_ord_id),
@@ -649,7 +649,7 @@ impl<const N: usize> ExecutionReportEngine<N> {
                     Self::exec_data_for_new(&exec_report.0),
                 ));
 
-                if exec_report.1.trades.len() > 0 {
+                if exec_report.1.trades_len() > 0 {
                     reports.push((
                         taker_key,
                         self.build_execution_report(exec_report),
@@ -661,7 +661,7 @@ impl<const N: usize> ExecutionReportEngine<N> {
                         types::Side::Sell => types::Side::Buy,
                     };
 
-                    for trade in exec_report.1.trades.iter() {
+                    for trade in exec_report.1.trades_iter() {
                         if trade.cl_ord_id != exec_report.0.cl_ord_id {
                             reports.push((
                                 trade.sender_id,
@@ -890,7 +890,7 @@ mod tests {
 
             let order_result = OrderResult {
                 internal_order_id: 100,
-                trades: Trades::default(),
+                trades: None,
                 status: types::OrderStatus::New,
                 ..Default::default()
             };
@@ -988,7 +988,7 @@ mod tests {
 
             let mut sell_order_result = OrderResult {
                 internal_order_id: 101,
-                trades: Trades::default(),
+                trades: None,
                 status: OrderStatus::New,
                 ..Default::default()
             };
@@ -1196,7 +1196,7 @@ mod tests {
             // Testing the Cancel scenario
             let cancel_order_result = types::OrderResult {
                 internal_order_id: 103,
-                trades: Trades::default(),
+                trades: None,
                 status: types::OrderStatus::Cancelled,
                 ..Default::default()
             };
@@ -1241,7 +1241,7 @@ mod tests {
             // testing the cancel rejection scenario
             let cancel_reject_order_result = types::OrderResult {
                 internal_order_id: 104,
-                trades: Trades::default(),
+                trades: None,
                 status: types::OrderStatus::CancelRejected,
                 ..Default::default()
             };

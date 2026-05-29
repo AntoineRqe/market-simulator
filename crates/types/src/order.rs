@@ -189,7 +189,7 @@ impl Ord for OrderEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OrderResult {
     pub internal_order_id: u64, // Internal order ID assigned by the engine, can be used for tracking and debugging
-    pub trades: Trades<4>,      // Fixed-size array for trades, adjust size as needed
+    pub trades: Option<Trades<4>>, // Fixed-size array for trades when executions occurred
     pub status: OrderStatus,
     pub timestamp_ms: u64, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
 }
@@ -198,7 +198,7 @@ impl Default for OrderResult {
     fn default() -> Self {
         Self {
             internal_order_id: 0,
-            trades: Trades::new(),
+            trades: None,
             status: OrderStatus::Unmatched,
             timestamp_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -218,18 +218,44 @@ impl std::fmt::Display for OrderResult {
              \ttimestamp_ms: {}",
             self.internal_order_id, self.status, self.timestamp_ms
         )?;
-        for i in 0..self.trades.len() {
-            let trade = self.trades[i];
-            write!(
-                f,
-                "  Trade {{ price: {}, quantity: {}, id: {:?}, cl_ord_id: {} }}\n",
-                trade.price.raw(),
-                trade.quantity,
-                trade.id,
-                trade.cl_ord_id
-            )?;
+        if let Some(trades) = self.trades {
+            for i in 0..trades.len() {
+                let trade = trades[i];
+                write!(
+                    f,
+                    "  Trade {{ price: {}, quantity: {}, id: {:?}, cl_ord_id: {} }}\n",
+                    trade.price.raw(),
+                    trade.quantity,
+                    trade.id,
+                    trade.cl_ord_id
+                )?;
+            }
         }
         Ok(())
+    }
+}
+
+impl OrderResult {
+    pub fn trades_iter(&self) -> impl Iterator<Item = &crate::trade::Trade> {
+        self.trades.iter().flat_map(|trades| trades.iter())
+    }
+
+    pub fn trades_len(&self) -> usize {
+        self.trades.map_or(0, |trades| trades.len())
+    }
+
+    pub fn traded_qty(&self) -> FixedPointArithmetic {
+        self.trades
+            .map_or(FixedPointArithmetic::ZERO, |trades| trades.quantity_sum())
+    }
+
+    pub fn avg_trade_price(&self) -> FixedPointArithmetic {
+        self.trades
+            .map_or(FixedPointArithmetic::ZERO, |trades| trades.avg_price())
+    }
+
+    pub fn first_trade(&self) -> Option<crate::trade::Trade> {
+        self.trades.and_then(|trades| trades.iter().next().copied())
     }
 }
 

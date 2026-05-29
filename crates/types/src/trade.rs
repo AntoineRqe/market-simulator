@@ -78,6 +78,12 @@ pub struct Trades<const N: usize> {
 
 impl<const N: usize> Default for Trades<N> {
     fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl<const N: usize> Trades<N> {
+    pub fn empty() -> Self {
         Self {
             trades: [Trade {
                 price: FixedPointArithmetic::ZERO,
@@ -88,17 +94,12 @@ impl<const N: usize> Default for Trades<N> {
                 target_id: EntityId::default(),
                 order_qty: FixedPointArithmetic::ZERO,
                 leaves_qty: FixedPointArithmetic::ZERO,
-                timestamp: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64,
+                timestamp: 0,
             }; N],
             count: 0,
         }
     }
-}
 
-impl<const N: usize> Trades<N> {
     pub fn new() -> Self {
         Self::default()
     }

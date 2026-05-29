@@ -458,7 +458,6 @@ fn run_latency_delete_with_depth(iters: u64, histogram: &mut Histogram<u64>) -> 
             loop {
                 if outbound_rx.try_recv().is_ok() {
                     break;
-                    some
                 }
                 std::hint::spin_loop();
             }

@@ -1,53 +1,30 @@
 use std::collections::{BTreeMap, HashMap};
-use types::{
-    FixedPointArithmetic, OrderEvent, OrderResult, OrderStatus, OrderType, Side, Trade, Trades,
-    macros::OrderId,
-};
+use std::time::{SystemTime, UNIX_EPOCH};
+use types::{FixedPointArithmetic, OrderEvent, OrderResult, OrderStatus, OrderType, Side, Trades, macros::OrderId};
 
-use utils::market_name;
+#[cfg(all(feature = "PriceLevelVecDeque", feature = "PriceLevelFifo"))]
+compile_error!(
+    "Features `PriceLevelVecDeque` and `PriceLevelFifo` are mutually exclusive; enable only one"
+);
+#[cfg(not(any(feature = "PriceLevelVecDeque", feature = "PriceLevelFifo")))]
+compile_error!("Either `PriceLevelVecDeque` or `PriceLevelFifo` must be enabled");
 
-type NodeId = usize;
+#[cfg(feature = "PriceLevelVecDeque")]
+#[path = "book-vecdeque.rs"]
+mod book_vecdeque;
+#[cfg(feature = "PriceLevelFifo")]
+#[path = "book-linked-list.rs"]
+mod book_linked_list;
 
-#[derive(Debug, Clone, Copy)]
-struct OrderRef {
-    side: Side,
-    price: FixedPointArithmetic,
-    node_id: NodeId,
-}
+#[cfg(feature = "PriceLevelVecDeque")]
+pub use self::book_vecdeque::PriceLevel;
+#[cfg(feature = "PriceLevelFifo")]
+pub use self::book_linked_list::PriceLevel;
 
-impl OrderRef {
-    fn new(side: Side, price: FixedPointArithmetic, node_id: NodeId) -> Self {
-        Self {
-            side,
-            price,
-            node_id,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Node {
-    order: OrderEvent,
-    prev: Option<NodeId>,
-    next: Option<NodeId>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct PriceLevel {
-    head: Option<NodeId>,
-    tail: Option<NodeId>,
-    len: usize,
-}
-
-impl PriceLevel {
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-}
+#[cfg(feature = "PriceLevelVecDeque")]
+use self::book_vecdeque::OrderRef;
+#[cfg(feature = "PriceLevelFifo")]
+use self::book_linked_list::{Node, NodeId, OrderRef};
 
 /// Represents the order book, maintaining separate heaps for bids and asks.
 /// Bids are stored in a max-heap (higher prices have priority), while asks are stored in a min-heap (lower prices have priority).
@@ -65,7 +42,9 @@ pub struct OrderBook {
     pub(crate) internal_id_counter: u64,
     /// Counter for generating unique trade IDs for matched orders. Each time a trade is executed, a new trade ID is generated using this counter to ensure that each trade can be uniquely identified and tracked.
     pub(crate) trade_id_counter: u64,
+    #[cfg(feature = "PriceLevelFifo")]
     nodes: Vec<Option<Node>>,
+    #[cfg(feature = "PriceLevelFifo")]
     free_nodes: Vec<NodeId>,
     /// Map to track orders by their ID for efficient cancellation and modification.
     order_map: HashMap<OrderId, OrderRef>,
@@ -94,11 +73,17 @@ impl OrderBook {
             asks: BTreeMap::new(),
             internal_id_counter: 1, // Start at 1; 0 is reserved as the sentinel "no ID" value
             trade_id_counter: 1,    // Start at 1; 0 is reserved as the sentinel "no ID" value
+            #[cfg(feature = "PriceLevelFifo")]
             nodes: Vec::new(),
+            #[cfg(feature = "PriceLevelFifo")]
             free_nodes: Vec::new(),
             order_map: HashMap::new(),  // Initialize the order map
             symbol: symbol.to_string(), // Set the symbol for this order book
         }
+    }
+
+    pub fn reserve_orders(&mut self, additional: usize) {
+        self.order_map.reserve(additional);
     }
 
     fn generate_internal_order_id(&mut self) -> u64 {
@@ -127,35 +112,6 @@ impl OrderBook {
         }
     }
 
-    fn node(&self, node_id: NodeId) -> &Node {
-        self.nodes[node_id]
-            .as_ref()
-            .expect("order node missing from arena")
-    }
-
-    fn node_mut(&mut self, node_id: NodeId) -> &mut Node {
-        self.nodes[node_id]
-            .as_mut()
-            .expect("order node missing from arena")
-    }
-
-    // TODO : instead of popping from the free list and pushing back to the nodes vector, we can maintain a linked list of free nodes within the nodes vector itself to avoid fragmentation and improve cache locality.
-    fn alloc_node(&mut self, order: OrderEvent) -> NodeId {
-        let node = Node {
-            order,
-            prev: None,
-            next: None,
-        };
-
-        if let Some(node_id) = self.free_nodes.pop() {
-            self.nodes[node_id] = Some(node);
-            node_id
-        } else {
-            self.nodes.push(Some(node));
-            self.nodes.len() - 1
-        }
-    }
-
     // TODO: This function is called multiple times during order matching, we can optimize it by caching the best price for each side and only updating it when the best price level is modified.
     fn best_price(&self, side: Side) -> Option<FixedPointArithmetic> {
         match side {
@@ -164,115 +120,12 @@ impl OrderBook {
         }
     }
 
-    fn head_node_id(&self, side: Side, price: FixedPointArithmetic) -> Option<NodeId> {
-        self.levels(side).get(&price).and_then(|level| level.head)
-    }
-
-    fn collect_level_orders(&self, level: &PriceLevel) -> Vec<OrderEvent> {
-        let mut orders = Vec::with_capacity(level.len);
-        let mut current = level.head;
-
-        while let Some(node_id) = current {
-            let node = self.node(node_id);
-            orders.push(node.order);
-            current = node.next;
-        }
-
-        orders
-    }
-
     #[cfg(test)]
     fn price_level_orders(&self, side: Side, price: FixedPointArithmetic) -> Vec<OrderEvent> {
         self.levels(side)
             .get(&price)
             .map(|level| self.collect_level_orders(level))
             .unwrap_or_default()
-    }
-
-    fn append_order(
-        &mut self,
-        side: Side,
-        price: FixedPointArithmetic,
-        order: OrderEvent,
-    ) -> NodeId {
-        let node_id = self.alloc_node(order);
-        let prev_tail = {
-            let level = self.levels_mut(side).entry(price).or_default();
-            let prev_tail = level.tail;
-            if level.head.is_none() {
-                level.head = Some(node_id);
-            }
-            level.tail = Some(node_id);
-            level.len += 1;
-            prev_tail
-        };
-
-        if let Some(prev_id) = prev_tail {
-            self.node_mut(prev_id).next = Some(node_id);
-            self.node_mut(node_id).prev = Some(prev_id);
-        }
-
-        node_id
-    }
-
-    fn unlink_node(
-        &mut self,
-        side: Side,
-        price: FixedPointArithmetic,
-        node_id: NodeId,
-    ) -> Option<OrderEvent> {
-        let node = self.nodes.get_mut(node_id)?.take()?;
-        let prev = node.prev;
-        let next = node.next;
-        let order = node.order;
-
-        if let Some(prev_id) = prev {
-            self.node_mut(prev_id).next = next;
-        }
-
-        if let Some(next_id) = next {
-            self.node_mut(next_id).prev = prev;
-        }
-
-        let remove_level = {
-            let level = self
-                .levels_mut(side)
-                .get_mut(&price)
-                .expect("price level missing for node");
-            if level.head == Some(node_id) {
-                level.head = next;
-            }
-            if level.tail == Some(node_id) {
-                level.tail = prev;
-            }
-            level.len -= 1;
-            level.is_empty()
-        };
-
-        if remove_level {
-            self.levels_mut(side).remove(&price);
-        }
-
-        self.free_nodes.push(node_id);
-        Some(order)
-    }
-
-    fn add_resting_order(&mut self, order: OrderEvent) {
-        let node_id = self.append_order(order.side, order.price, order);
-        self.order_map.insert(
-            order.cl_ord_id,
-            OrderRef::new(order.side, order.price, node_id),
-        );
-        tracing::debug!(
-            "[{}][{}][{}] Added order with ID: {}, side: {:?}, price: {}, node_id: {} to order map",
-            market_name(),
-            order.symbol,
-            order.cl_ord_id,
-            order.cl_ord_id,
-            order.side,
-            order.price,
-            node_id
-        );
     }
 
     /// Processes an incoming order by determining its type (limit or market) and side (buy or sell), and then calling the appropriate processing function. The function is instrumented with tracing to provide detailed logs of the order processing steps, including the order ID, side, price, and quantity.
@@ -325,106 +178,6 @@ impl OrderBook {
         }
     }
 
-    /// Processes a cancel order by looking up the original order using the `orig_cl_ord_id` and removing it from the order book if it exists. The function checks for the validity of the cancel order, including the presence of the original client order ID and the existence of the original order in the order book. If the cancellation is successful, it returns an `OrderResult` with a status of `Cancelled`. If the cancellation fails (e.g., due to missing original client order ID or order not found), it returns an `OrderResult` with a status of `CancelRejected`.
-    /// Arguments:
-    /// - `order`: The incoming cancel order to be processed, containing details such as the original client order ID, order ID, and broker ID.
-    /// Returns:
-    /// - An `OrderResult` containing the details of the processed cancel order, including any trade ID and status. The status is determined based on the success or failure of the cancellation.
-    fn process_cancel_order(&mut self, order: OrderEvent) -> (OrderEvent, OrderResult) {
-        let orig_cl_ord_id = if let Some(orig_cl_ord_id) = order.orig_cl_ord_id {
-            orig_cl_ord_id
-        } else {
-            tracing::error!(
-                "[{}][{}][{}] Cancel order with ID: {} is missing original client order ID, cannot process cancellation",
-                market_name(),
-                order.symbol,
-                order.cl_ord_id,
-                order.cl_ord_id
-            );
-            return (
-                order,
-                OrderResult {
-                    internal_order_id: 0, // No internal order ID since the cancellation cannot be processed
-                    trades: Trades::default(),
-                    status: OrderStatus::CancelRejected,
-                    ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
-                },
-            );
-        };
-
-        if let Some(order_ref) = self.order_map.get(&orig_cl_ord_id).copied() {
-            if let Some(cancelled_order) =
-                self.unlink_node(order_ref.side, order_ref.price, order_ref.node_id)
-            {
-                let mut cancel_ack = order;
-                cancel_ack.side = cancelled_order.side;
-                cancel_ack.price = cancelled_order.price;
-                cancel_ack.quantity = cancelled_order.quantity;
-
-                tracing::debug!(
-                    "[{}][{}][{}] Cancelled order with ID: {}, side: {:?}, price: {}, node_id: {}",
-                    market_name(),
-                    order.symbol,
-                    order.cl_ord_id,
-                    orig_cl_ord_id,
-                    order_ref.side,
-                    order_ref.price,
-                    order_ref.node_id
-                );
-
-                if self.order_map.remove(&orig_cl_ord_id).is_none() {
-                    tracing::error!(
-                        "[{}][{}][{}] Failed to remove order with ID: {} from order map after cancellation, order not found",
-                        market_name(),
-                        order.symbol,
-                        order.cl_ord_id,
-                        orig_cl_ord_id
-                    );
-                }
-
-                return (
-                    cancel_ack,
-                    OrderResult {
-                        internal_order_id: self.generate_internal_order_id(),
-                        trades: Trades::default(),
-                        status: OrderStatus::Cancelled,
-                        ..Default::default()
-                    },
-                );
-            }
-
-            tracing::error!(
-                "[{}][{}][{}] Failed to cancel order with ID: {}, side: {:?}, price: {}, node_id: {}, order not found in queue",
-                market_name(),
-                order.symbol,
-                order.cl_ord_id,
-                orig_cl_ord_id,
-                order_ref.side,
-                order_ref.price,
-                order_ref.node_id
-            );
-        }
-
-        tracing::error!(
-            "[{}][{}][{}] Failed to cancel order with ID: {}, original client order ID: {}, order not found in order book",
-            market_name(),
-            order.symbol,
-            order.cl_ord_id,
-            order.cl_ord_id,
-            orig_cl_ord_id
-        );
-        // If we reach this point, it means the order was not found or could not be cancelled
-        (
-            order,
-            OrderResult {
-                internal_order_id: self.generate_internal_order_id(),
-                trades: Trades::default(),
-                status: OrderStatus::CancelRejected,
-                ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
-            },
-        )
-    }
-
     /// Generates an `OrderResult` based on the processed order, including trade ID and status.
     /// The trade ID is generated if the order was partially or fully filled, and the status is determined based on the remaining quantity of the order.
     /// Arguments:
@@ -432,149 +185,33 @@ impl OrderBook {
     /// - `trades`: The trades that were executed as a result of processing the order, which may include multiple trades if the order was matched against multiple existing orders in the order book.
     /// Returns:
     /// - An `OrderResult` containing the details of the processed order, including any trade ID and status. The status is determined based on the remaining quantity of the order after processing.
+    pub(super) fn build_order_result(
+        &mut self,
+        status: OrderStatus,
+        trades: Option<Trades<4>>,
+    ) -> OrderResult {
+        OrderResult {
+            internal_order_id: self.generate_internal_order_id(),
+            trades,
+            status,
+            timestamp_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        }
+    }
+
     fn generate_order_result(
         &mut self,
         order: OrderEvent,
-        trades: Trades<4>,
+        trades: Option<Trades<4>>,
     ) -> (OrderEvent, OrderResult) {
-        let order_result = OrderResult {
-            trades,
-            status: OrderStatus::New,
-            internal_order_id: self.generate_internal_order_id(),
-            ..Default::default() // Timestamp can be set to the current time in milliseconds since epoch if needed for time-priority sorting in the future
+        let status = match (trades.is_some(), order.quantity) {
+            (false, _) => OrderStatus::Unmatched,
+            (true, quantity) if quantity == FixedPointArithmetic::ZERO => OrderStatus::Filled,
+            (true, _) => OrderStatus::PartiallyFilled,
         };
-        (order, order_result)
-    }
-
-    /// Processes a sell limit order by matching it against the best available bids in the order book. If the order is not fully filled, it is added to the asks heap.
-    /// Arguments:
-    /// - `order`: The incoming sell limit order to be processed.
-    /// Returns:
-    /// - An `OrderResult` containing the details of the processed order, including any trade ID and status.
-    fn process_sell_limit_order(&mut self, order: OrderEvent) -> (OrderEvent, OrderResult) {
-        let mut remaining_quantity = order.quantity;
-        let mut trades = Trades::default();
-        while let Some(best_bid_price) = self.best_price(Side::Buy) {
-            if best_bid_price < order.price {
-                break;
-            }
-
-            while remaining_quantity > FixedPointArithmetic::ZERO {
-                let best_bid_id = match self.head_node_id(Side::Buy, best_bid_price) {
-                    Some(node_id) => node_id,
-                    None => break,
-                };
-
-                let maker_qty_before = self.node(best_bid_id).order.quantity;
-                let trade_quantity = remaining_quantity.min(maker_qty_before);
-                self.node_mut(best_bid_id).order.quantity -= trade_quantity;
-                remaining_quantity -= trade_quantity;
-
-                let best_bid = self.node(best_bid_id).order;
-                if let Err(_) = trades.add_trade(Trade {
-                    price: best_bid.price,
-                    cl_ord_id: best_bid.cl_ord_id,
-                    sender_id: best_bid.sender_id,
-                    target_id: best_bid.target_id,
-                    quantity: trade_quantity,
-                    id: self.generate_trade_id(),
-                    order_qty: maker_qty_before,
-                    leaves_qty: best_bid.quantity,
-                    ..Default::default()
-                }) {
-                    tracing::error!(
-                        "[{}][{}][{}] Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult",
-                        market_name(),
-                        order.symbol,
-                        order.cl_ord_id
-                    );
-                }
-
-                if best_bid.quantity == FixedPointArithmetic::ZERO {
-                    self.unlink_node(Side::Buy, best_bid_price, best_bid_id);
-                    self.order_map.remove(&best_bid.cl_ord_id);
-                }
-
-                if remaining_quantity == FixedPointArithmetic::ZERO {
-                    return self.generate_order_result(order, trades);
-                }
-            }
-        }
-
-        let order_result = self.generate_order_result(order, trades);
-
-        if remaining_quantity > FixedPointArithmetic::ZERO {
-            let mut resting_order = order;
-            resting_order.quantity = remaining_quantity;
-            self.add_resting_order(resting_order);
-        }
-
-        order_result
-    }
-
-    /// Processes a buy limit order by matching it against the best available asks in the order book. If the order is not fully filled, it is added to the bids heap.
-    /// Arguments:
-    /// - `order`: The incoming buy limit order to be processed.
-    /// Returns:
-    /// - An `OrderResult` containing the details of the processed order, including any trade ID and status.
-    fn process_buy_limit_order(&mut self, order: OrderEvent) -> (OrderEvent, OrderResult) {
-        let mut remaining_quantity = order.quantity;
-        let mut trades = Trades::default();
-        while let Some(best_ask_price) = self.best_price(Side::Sell) {
-            if best_ask_price > order.price {
-                break;
-            }
-
-            while remaining_quantity > FixedPointArithmetic::ZERO {
-                let best_ask_id = match self.head_node_id(Side::Sell, best_ask_price) {
-                    Some(node_id) => node_id,
-                    None => break,
-                };
-
-                let maker_qty_before = self.node(best_ask_id).order.quantity;
-                let trade_quantity = remaining_quantity.min(maker_qty_before);
-                self.node_mut(best_ask_id).order.quantity -= trade_quantity;
-                remaining_quantity -= trade_quantity;
-
-                let best_ask = self.node(best_ask_id).order;
-                if let Err(_) = trades.add_trade(Trade {
-                    price: best_ask.price,
-                    cl_ord_id: best_ask.cl_ord_id,
-                    sender_id: best_ask.sender_id,
-                    target_id: best_ask.target_id,
-                    quantity: trade_quantity,
-                    id: self.generate_trade_id(),
-                    order_qty: maker_qty_before,
-                    leaves_qty: best_ask.quantity,
-                    ..Default::default()
-                }) {
-                    tracing::error!(
-                        "[{}][{}][{}] Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult",
-                        market_name(),
-                        order.symbol,
-                        order.cl_ord_id
-                    );
-                }
-
-                if best_ask.quantity == FixedPointArithmetic::ZERO {
-                    self.unlink_node(Side::Sell, best_ask_price, best_ask_id);
-                    self.order_map.remove(&best_ask.cl_ord_id);
-                }
-
-                if remaining_quantity == FixedPointArithmetic::ZERO {
-                    return self.generate_order_result(order, trades);
-                }
-            }
-        }
-
-        let (order, order_result) = self.generate_order_result(order, trades);
-
-        if remaining_quantity > FixedPointArithmetic::ZERO {
-            let mut resting_order = order;
-            resting_order.quantity = remaining_quantity;
-            self.add_resting_order(resting_order);
-        }
-
+        let order_result = self.build_order_result(status, trades);
         (order, order_result)
     }
 
@@ -586,24 +223,6 @@ impl OrderBook {
     fn process_sell_market_order(&mut self, mut order: OrderEvent) -> (OrderEvent, OrderResult) {
         order.price = FixedPointArithmetic::from_f64(f64::NEG_INFINITY); // Market orders are treated as having an infinitely low price to ensure they match with the best available bids
         self.process_sell_limit_order(order)
-    }
-
-    /// Gets the best bid from the order book, which is the highest-priced buy order. Since bids are stored in a max-heap, we can directly access the top element.
-    /// Returns:
-    /// - An `Option<&OrderEvent>` containing a reference to the best bid if it exists
-    pub fn get_best_bid(&self) -> Option<&OrderEvent> {
-        let (_price, level) = self.bids.last_key_value()?;
-        let node_id = level.head?;
-        Some(&self.node(node_id).order)
-    }
-
-    /// Gets the best ask from the order book, which is the lowest-priced sell order. Since asks are stored in a min-heap using `Reverse`, we need to access the inner `OrderEvent` from the `Reverse` wrapper.
-    /// Returns:
-    /// - An `Option<&OrderEvent>` containing a reference to the best ask if it exists, or `None` if there are no asks in the order book.
-    pub fn get_best_ask(&self) -> Option<&OrderEvent> {
-        let (_price, level) = self.asks.first_key_value()?;
-        let node_id = level.head?;
-        Some(&self.node(node_id).order)
     }
 
     /// Calculates the spread of the order book, which is the difference between the best ask price and the best bid price. If either the best bid or best ask is not available, it returns `None`.
@@ -763,9 +382,9 @@ mod tests {
 
         assert_eq!(order.price, FixedPointArithmetic::from_f64(100.0));
         assert_eq!(order.quantity, FixedPointArithmetic::from_f64(10.0));
-        assert_eq!(result.trades.len(), 0); // No trades executed
-        assert_eq!(result.trades.quantity_sum(), FixedPointArithmetic::ZERO); // Total quantity should be zero since no trades were executed
-        assert_eq!(result.trades.avg_price(), FixedPointArithmetic::ZERO); // Average price should be zero since no trades were executed
+        assert_eq!(result.trades_len(), 0); // No trades executed
+        assert_eq!(result.traded_qty(), FixedPointArithmetic::ZERO); // Total quantity should be zero since no trades were executed
+        assert_eq!(result.avg_trade_price(), FixedPointArithmetic::ZERO); // Average price should be zero since no trades were executed
         assert_eq!(result.status, OrderStatus::New);
         assert_eq!(
             order_book.get_best_bid().unwrap().price,
@@ -810,26 +429,26 @@ mod tests {
 
         assert_eq!(order1.price, FixedPointArithmetic::from_f64(100.0));
         assert_eq!(order1.quantity, FixedPointArithmetic::from_f64(10.0));
-        assert_eq!(result1.trades.len(), 0); // No trades executed for the first order
+        assert_eq!(result1.trades_len(), 0); // No trades executed for the first order
         assert_eq!(result1.status, OrderStatus::New);
 
         assert_eq!(order2.price, FixedPointArithmetic::from_f64(100.0));
         assert_eq!(order2.quantity, FixedPointArithmetic::from_f64(5.0)); // The second order should be completely filled, so the remaining quantity should be 0
-        assert_eq!(result2.trades.len(), 1); // One trade executed for the second order
+        assert_eq!(result2.trades_len(), 1); // One trade executed for the second order
         assert_eq!(
-            result2.trades[0].quantity,
+            result2.trades.unwrap()[0].quantity,
             FixedPointArithmetic::from_f64(5.0)
         ); // 5 units filled
         assert_eq!(
-            result2.trades[0].price,
+            result2.trades.unwrap()[0].price,
             FixedPointArithmetic::from_f64(100.0)
         ); // Trade price should be 100.0
         assert_eq!(
-            result2.trades.quantity_sum(),
+            result2.traded_qty(),
             FixedPointArithmetic::from_f64(5.0)
         ); // Total quantity should be 5.0
         assert_eq!(
-            result2.trades.avg_price(),
+            result2.avg_trade_price(),
             FixedPointArithmetic::from_f64(100.0)
         ); // Average price should be 100.0
         assert_eq!(result2.status, OrderStatus::New);
@@ -884,63 +503,63 @@ mod tests {
         // The first order should not be matched immediately, as there are no existing orders in the order book, so it should be added to the bids.
         assert!(order1.price == FixedPointArithmetic::from_f64(100.0));
         assert!(order1.quantity == FixedPointArithmetic::from_f64(10.0));
-        assert_eq!(result1.trades.len(), 0); // No trades executed,
-        assert_eq!(result1.trades.quantity_sum(), FixedPointArithmetic::ZERO); // Total quantity should be zero since no trades were executed
-        assert_eq!(result1.trades.avg_price(), FixedPointArithmetic::ZERO); // Average price should be zero since no trades were executed
+        assert_eq!(result1.trades_len(), 0); // No trades executed,
+        assert_eq!(result1.traded_qty(), FixedPointArithmetic::ZERO); // Total quantity should be zero since no trades were executed
+        assert_eq!(result1.avg_trade_price(), FixedPointArithmetic::ZERO); // Average price should be zero since no trades were executed
         assert_eq!(result1.status, OrderStatus::New);
 
         // The second order should be completely filled (5 units filled, 0 units remaining).
         assert_eq!(order2.price, FixedPointArithmetic::from_f64(99.0));
         assert_eq!(order2.quantity, FixedPointArithmetic::from_f64(5.0));
-        assert_eq!(result2.trades.len(), 1); // 5 units * 99.0 price
-        assert_eq!(result2.trades[0].id, 1); // Trade ID should be 1 for the first trade (counter starts at 1)
+        assert_eq!(result2.trades_len(), 1); // 5 units * 99.0 price
+        assert_eq!(result2.trades.unwrap()[0].id, 1); // Trade ID should be 1 for the first trade (counter starts at 1)
         assert_eq!(
-            result2.trades[0].quantity,
+            result2.trades.unwrap()[0].quantity,
             FixedPointArithmetic::from_f64(5.0)
         ); // 5 units filled
         assert_eq!(
-            result2.trades[0].price,
+            result2.trades.unwrap()[0].price,
             FixedPointArithmetic::from_f64(100.0)
         ); // 100.0
         assert_eq!(
-            result2.trades.avg_price(),
+            result2.avg_trade_price(),
             FixedPointArithmetic::from_f64(100.0)
         ); // Average price should be 100.0
-        assert!(result2.trades.quantity_sum() == FixedPointArithmetic::from_f64(5.0)); // Total quantity should be 5.0
+        assert!(result2.traded_qty() == FixedPointArithmetic::from_f64(5.0)); // Total quantity should be 5.0
         assert_eq!(result2.status, OrderStatus::New);
         assert_eq!(
-            result2.trades.avg_price(),
+            result2.avg_trade_price(),
             FixedPointArithmetic::from_f64(100.0)
         ); // Average price should be 100.0
         assert_eq!(
-            result2.trades.quantity_sum(),
+            result2.traded_qty(),
             FixedPointArithmetic::from_f64(5.0)
         ); // Total quantity should be 5.0
 
         // The third order should not be matched immediately, as there are no existing orders in the order book, so it should be added to the asks.
         assert_eq!(order3.price, FixedPointArithmetic::from_f64(98.0));
         assert_eq!(order3.quantity, FixedPointArithmetic::from_f64(10.0));
-        assert_eq!(result3.trades.len(), 1); // 5 units * 98.0 price
+        assert_eq!(result3.trades_len(), 1); // 5 units * 98.0 price
         assert_eq!(
-            result3.trades[0].quantity,
+            result3.trades.unwrap()[0].quantity,
             FixedPointArithmetic::from_f64(5.0)
         ); // 5 units filled
         assert_eq!(
-            result3.trades[0].price,
+            result3.trades.unwrap()[0].price,
             FixedPointArithmetic::from_f64(100.0)
         ); // 5 units * 100.0 price
         assert_eq!(
-            result3.trades.avg_price(),
+            result3.avg_trade_price(),
             FixedPointArithmetic::from_f64(100.0)
         ); // Average price should be 100.0
-        assert!(result3.trades.quantity_sum() == FixedPointArithmetic::from_f64(5.0)); // Total quantity should be 5.0
+        assert!(result3.traded_qty() == FixedPointArithmetic::from_f64(5.0)); // Total quantity should be 5.0
         assert_eq!(result3.status, OrderStatus::New);
         assert_eq!(
-            result3.trades.avg_price(),
+            result3.avg_trade_price(),
             FixedPointArithmetic::from_f64(100.0)
         ); // Average price should be 100.0
         assert_eq!(
-            result3.trades.quantity_sum(),
+            result3.traded_qty(),
             FixedPointArithmetic::from_f64(5.0)
         ); // Total quantity should be 5.0
 
@@ -1027,56 +646,56 @@ mod tests {
         // The first order should not be matched immediately, as there are no existing orders in the order book, so it should be added to the bids.
         assert_eq!(order1.price, FixedPointArithmetic::from_f64(99.0));
         assert_eq!(order1.quantity, FixedPointArithmetic::from_f64(3.0));
-        assert_eq!(result1.trades.len(), 0); // No trades executed,
+        assert_eq!(result1.trades_len(), 0); // No trades executed,
         assert_eq!(result1.status, OrderStatus::New);
 
         // The second order should not be matched immediately, as there are no existing orders in the order book, so it should be added to the bids.
         assert_eq!(order2.price, FixedPointArithmetic::from_f64(98.0));
         assert_eq!(order2.quantity, FixedPointArithmetic::from_f64(5.0));
-        assert_eq!(result2.trades.len(), 0); // No trades executed,
+        assert_eq!(result2.trades_len(), 0); // No trades executed,
         assert_eq!(result2.status, OrderStatus::New);
 
         // The third order should not be matched immediately, as there are no existing orders in the order book, so it should be added to the bids.
         assert_eq!(order3.price, FixedPointArithmetic::from_f64(97.0));
         assert_eq!(order3.quantity, FixedPointArithmetic::from_f64(3.0));
-        assert_eq!(result3.trades.len(), 0); // No trades executed,
+        assert_eq!(result3.trades_len(), 0); // No trades executed,
         assert_eq!(result3.status, OrderStatus::New);
 
         // The fourth order should be completely filled (3 units filled at 97.0, 5 units filled at 98.0, and 2 units filled at 99.0).
         assert_eq!(order4.price, FixedPointArithmetic::from_f64(100.0));
         assert_eq!(order4.quantity, FixedPointArithmetic::from_f64(10.0));
-        assert_eq!(result4.trades.len(), 3); // 3 trades executed
+        assert_eq!(result4.trades_len(), 3); // 3 trades executed
         assert_eq!(
-            result4.trades[0].quantity,
+            result4.trades.unwrap()[0].quantity,
             FixedPointArithmetic::from_f64(3.0)
         ); // 3 units filled
         assert_eq!(
-            result4.trades[0].price,
+            result4.trades.unwrap()[0].price,
             FixedPointArithmetic::from_f64(97.0)
         ); // 3 units * 97.0 price
         assert_eq!(
-            result4.trades[1].quantity,
+            result4.trades.unwrap()[1].quantity,
             FixedPointArithmetic::from_f64(5.0)
         ); // 5 units filled
         assert_eq!(
-            result4.trades[1].price,
+            result4.trades.unwrap()[1].price,
             FixedPointArithmetic::from_f64(98.0)
         ); // 5 units * 98.0 price
         assert_eq!(
-            result4.trades[2].quantity,
+            result4.trades.unwrap()[2].quantity,
             FixedPointArithmetic::from_f64(2.0)
         ); // 2 units filled
         assert_eq!(
-            result4.trades[2].price,
+            result4.trades.unwrap()[2].price,
             FixedPointArithmetic::from_f64(99.0)
         ); // 2 units * 99.0 price
         assert_eq!(result4.status, OrderStatus::New);
         assert_eq!(
-            result4.trades.avg_price(),
+            result4.avg_trade_price(),
             FixedPointArithmetic::from_f64(97.9)
         ); // Average price should be (3*97 + 5*98 + 2*99) / 10 = 98.0
         assert_eq!(
-            result4.trades.quantity_sum(),
+            result4.traded_qty(),
             FixedPointArithmetic::from_f64(10.0)
         ); // Total quantity should be 10.0
 
@@ -1166,39 +785,39 @@ mod tests {
         // The first three orders should be added to the asks heap as they are limit sell orders.
         assert_eq!(order1.price, FixedPointArithmetic::from_f64(99.0));
         assert_eq!(order1.quantity, FixedPointArithmetic::from_f64(5.0));
-        assert_eq!(result1.trades.len(), 0); // No trades executed
+        assert_eq!(result1.trades_len(), 0); // No trades executed
         assert_eq!(result1.status, OrderStatus::New);
 
         assert_eq!(order2.price, FixedPointArithmetic::from_f64(98.0));
         assert_eq!(order2.quantity, FixedPointArithmetic::from_f64(5.0));
-        assert_eq!(result2.trades.len(), 0); // No trades executed
+        assert_eq!(result2.trades_len(), 0); // No trades executed
         assert_eq!(result2.status, OrderStatus::New);
 
         assert_eq!(order3.price, FixedPointArithmetic::from_f64(98.0));
         assert_eq!(order3.quantity, FixedPointArithmetic::from_f64(10.0));
-        assert_eq!(result3.trades.len(), 0); // No trades executed
+        assert_eq!(result3.trades_len(), 0); // No trades executed
         assert_eq!(result3.status, OrderStatus::New);
 
         // The fourth order should be completely filled (5 units filled at 98.0 and 7 units filled at 99.0).
         assert_eq!(order4.price, FixedPointArithmetic::from_f64(f64::MAX)); // Price is ignored for market orders
         assert_eq!(order4.quantity, FixedPointArithmetic::from_f64(12.0));
-        assert_eq!(result4.trades.len(), 2); // 2 trades executed
-        assert_eq!(result4.trades[0].id, 1); // Trade ID should be 1 for the first trade (counter starts at 1)
+        assert_eq!(result4.trades_len(), 2); // 2 trades executed
+        assert_eq!(result4.trades.unwrap()[0].id, 1); // Trade ID should be 1 for the first trade (counter starts at 1)
         assert_eq!(
-            result4.trades[0].quantity,
+            result4.trades.unwrap()[0].quantity,
             FixedPointArithmetic::from_f64(5.0)
         ); // 5 units filled
         assert_eq!(
-            result4.trades[0].price,
+            result4.trades.unwrap()[0].price,
             FixedPointArithmetic::from_f64(98.0)
         ); // 5 units * 98.0 price
-        assert_eq!(result4.trades[1].id, 2); // Trade ID should be 2 for the second trade
+        assert_eq!(result4.trades.unwrap()[1].id, 2); // Trade ID should be 2 for the second trade
         assert_eq!(
-            result4.trades[1].quantity,
+            result4.trades.unwrap()[1].quantity,
             FixedPointArithmetic::from_f64(7.0)
         ); // 7 units filled
         assert_eq!(
-            result4.trades[1].price,
+            result4.trades.unwrap()[1].price,
             FixedPointArithmetic::from_f64(98.0)
         ); // 7 units * 98.0 price
         assert_eq!(result4.status, OrderStatus::New);

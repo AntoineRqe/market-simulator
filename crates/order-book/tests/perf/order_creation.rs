@@ -11,6 +11,7 @@ use types::macros::OrderId;
 fn main() {
     let iters = common::scenario_iters();
     let mut book = common::new_order_book();
+    book.reserve_orders(iters as usize);
     let mut next_order_id = OrderId::from_ascii("CREATE-ORDER-00001");
 
     let start = Instant::now();

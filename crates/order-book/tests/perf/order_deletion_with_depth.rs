@@ -13,6 +13,7 @@ const BOOK_DEPTH: usize = 10_000;
 fn main() {
     let iters = common::scenario_iters();
     let mut book = common::new_order_book();
+    book.reserve_orders(BOOK_DEPTH + (iters as usize));
     let mut next_order_id = OrderId::from_ascii("DEPTH-ORDER-00001");
     let mut next_cancel_id = OrderId::from_ascii("DEPTH-CANCEL-0001");
 

@@ -3,6 +3,11 @@ name = "order-book"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["PriceLevelFifo"]
+PriceLevelVecDeque = []
+PriceLevelFifo = []
+
 [dependencies]
 tracing.workspace = true
 spsc = { path = "../spsc" }

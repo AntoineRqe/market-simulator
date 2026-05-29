@@ -512,7 +512,7 @@ fn benchmark_latency_fix_inbound(iters: u64, histogram: &mut Histogram<u64>) -> 
                 },
                 resp_queue: None, // Not using the response queue in this test, but could be set here if needed for future tests
             };
-        
+
             for i in 0..iters {
                 let tmp_raw_msg = raw_msg.clone(); // Create a mutable copy for this iteration
 
@@ -522,7 +522,7 @@ fn benchmark_latency_fix_inbound(iters: u64, histogram: &mut Histogram<u64>) -> 
                         std::hint::spin_loop();
                     }
                 }
-    
+
                 ready_prod.store(false, std::sync::atomic::Ordering::Release);
 
                 let send_ts = Instant::now();
@@ -650,11 +650,11 @@ fn benchmark_latency_fix_outbound(iters: u64, histogram: &mut Histogram<u64>) ->
                 qty: 1_000_000.0,
                 leaves_qty: 0.0,
             };
-            
+
             let fix_msg = b"8=FIX.4.4\x019=0000\x0135=8\x0149=SENDER\x0156=TARGET\x0134=1\x0152=20240219-12:30:00.000\x0139=2\x0110=123\x01";
             let mut fix_data = [0u8; RB_SIZE];
             fix_data[..fix_msg.len()].copy_from_slice(fix_msg);
-            
+
             let response_msg = ExecutionReportMessage::new(
                 fix_msg.len() as u16,
                 fix_data,
@@ -812,7 +812,7 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
                 },
                 resp_queue: Some(response_tx.clone()),
             };
-        
+
             for i in 0..iters {
 
                 if i > 0 {
@@ -821,7 +821,7 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
                         std::hint::spin_loop();
                     }
                 }
-    
+
                 ready_prod.store(false, std::sync::atomic::Ordering::Release);
 
                 let mut tmp_raw_msg = raw_msg.clone(); // Clone the message for this iteration
@@ -867,13 +867,13 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
 }
 
 fn benchmark_latency(c: &mut Criterion) {
-    let functions: &[(&str, fn(u64, &mut Histogram<u64>) -> Duration); 6] = &[
-        ("Execution Report", benchmark_latency_execution_report),
+    let functions: &[(&str, fn(u64, &mut Histogram<u64>) -> Duration); 1] = &[
+        // ("Execution Report", benchmark_latency_execution_report),
         ("Order Book", benchmark_latency_order_book),
-        ("FIX Inbound", benchmark_latency_fix_inbound),
-        ("FIX Outbound", benchmark_latency_fix_outbound),
-        ("Market Feed", benchmark_latency_market_feed),
-        ("Overall", benchmark_latency_all),
+        // ("FIX Inbound", benchmark_latency_fix_inbound),
+        // ("FIX Outbound", benchmark_latency_fix_outbound),
+        // ("Market Feed", benchmark_latency_market_feed),
+        // ("Overall", benchmark_latency_all),
     ];
 
     for (name, func) in functions {

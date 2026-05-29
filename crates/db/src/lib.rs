@@ -665,7 +665,7 @@ pub async fn collect_all_order_results(pool: &PgPool) -> Result<Vec<OrderResult>
         .into_iter()
         .map(|row| OrderResult {
             internal_order_id: row.get::<Option<i64>, _>("order_id").unwrap_or_default() as u64,
-            trades: types::Trades::<4>::new(),
+            trades: None,
             status: parse_order_status(row.get("status")),
             timestamp_ms: i64_to_timestamp_ms(row.get::<Option<i64>, _>("result_timestamp_ms")),
             // `Instant` cannot be faithfully reconstructed from SQL text, so we
@@ -832,7 +832,7 @@ pub async fn persist_order_update(
 
     // If the order was filled or partially filled, we need to insert the corresponding trades into the trades table, and update the pending orders table accordingly.
     if matches!(result_type, "FILL" | "PARTIAL_FILL") {
-        for trade in order_result.trades.iter() {
+        for trade in order_result.trades_iter() {
             let (buy_cl_ord_id, sell_cl_ord_id) = match order_event.side {
                 Side::Buy => (
                     Some(order_event.cl_ord_id.to_string()),
@@ -953,7 +953,7 @@ async fn sync_maker_pending_orders_from_trades(
 ) -> Result<(), sqlx::Error> {
     let taker_cl_ord_id = order_event.cl_ord_id.to_string();
 
-    for trade in order_result.trades.iter() {
+    for trade in order_result.trades_iter() {
         let maker_cl_ord_id = trade.cl_ord_id.to_string();
         if maker_cl_ord_id.is_empty() || maker_cl_ord_id == taker_cl_ord_id {
             continue;
@@ -1099,7 +1099,7 @@ fn remaining_quantity(
     order_event: &OrderEvent,
     order_result: &OrderResult,
 ) -> FixedPointArithmetic {
-    let traded_qty = order_result.trades.quantity_sum();
+    let traded_qty = order_result.traded_qty();
     if traded_qty >= order_event.quantity {
         FixedPointArithmetic::ZERO
     } else {
@@ -1115,7 +1115,7 @@ fn classify_result_type(order_event: &OrderEvent, order_result: &OrderResult) ->
         OrderStatus::Cancelled => "CANCELLED",
         OrderStatus::CancelRejected => "CANCEL_REJECTED",
         OrderStatus::New => {
-            let traded_qty = order_result.trades.quantity_sum();
+            let traded_qty = order_result.traded_qty();
             if traded_qty == FixedPointArithmetic::ZERO {
                 "NEW"
             } else if traded_qty >= order_event.quantity {
@@ -1193,7 +1193,7 @@ fn is_sentinel_event(order_event: &OrderEvent, order_result: &OrderResult) -> bo
         && order_event.target_id.to_string().is_empty()
         && order_event.symbol.to_string().is_empty()
         && order_result.internal_order_id == 0
-        && order_result.trades.len() == 0
+        && order_result.trades_len() == 0
         && order_result.status == OrderStatus::Unmatched
 }
 
@@ -1316,7 +1316,7 @@ mod tests {
         let order_result = OrderResult {
             internal_order_id: 101,
             status: OrderStatus::Filled,
-            trades,
+            trades: Some(trades),
             ..Default::default()
         };
 
@@ -1396,7 +1396,7 @@ mod tests {
         let order_result = OrderResult {
             internal_order_id: 102,
             status: OrderStatus::PartiallyFilled,
-            trades,
+            trades: Some(trades),
             timestamp_ms: 1_755_123_456_789,
             ..Default::default()
         };
@@ -1451,7 +1451,7 @@ mod tests {
         let new_result = OrderResult {
             internal_order_id: 201,
             status: OrderStatus::New,
-            trades: Trades::<4>::new(),
+            trades: None,
             ..Default::default()
         };
 
@@ -1480,7 +1480,7 @@ mod tests {
         let partial_result = OrderResult {
             internal_order_id: 202,
             status: OrderStatus::PartiallyFilled,
-            trades: partial_trades,
+            trades: Some(partial_trades),
             ..Default::default()
         };
 
@@ -1508,7 +1508,7 @@ mod tests {
         let filled_result = OrderResult {
             internal_order_id: 203,
             status: OrderStatus::Filled,
-            trades: fill_trades,
+            trades: Some(fill_trades),
             ..Default::default()
         };
 
@@ -1548,7 +1548,7 @@ mod tests {
             &OrderResult {
                 internal_order_id: 301,
                 status: OrderStatus::New,
-                trades: Trades::<4>::new(),
+                trades: None,
                 ..Default::default()
             },
         )
@@ -1573,7 +1573,7 @@ mod tests {
             &OrderResult {
                 internal_order_id: 302,
                 status: OrderStatus::Cancelled,
-                trades: Trades::<4>::new(),
+                trades: None,
                 ..Default::default()
             },
         )
@@ -1612,7 +1612,7 @@ mod tests {
             &OrderResult {
                 internal_order_id: 401,
                 status: OrderStatus::New,
-                trades: Trades::<4>::new(),
+                trades: None,
                 ..Default::default()
             },
         )
@@ -1650,7 +1650,7 @@ mod tests {
             &OrderResult {
                 internal_order_id: 402,
                 status: OrderStatus::Filled,
-                trades: taker_trades,
+                trades: Some(taker_trades),
                 ..Default::default()
             },
         )
@@ -1693,7 +1693,7 @@ mod tests {
             &OrderResult {
                 internal_order_id: 501,
                 status: OrderStatus::New,
-                trades: Trades::<4>::new(),
+                trades: None,
                 ..Default::default()
             },
         )
@@ -1731,7 +1731,7 @@ mod tests {
             &OrderResult {
                 internal_order_id: 502,
                 status: OrderStatus::Filled,
-                trades: taker_trades,
+                trades: Some(taker_trades),
                 ..Default::default()
             },
         )

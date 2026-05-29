@@ -104,6 +104,17 @@ cargo flamegraph -p order-book --test perf_order_deletion --release
 cargo flamegraph -p order-book --test perf_order_deletion_with_depth --release
 ```
 
+### Price level implementations (Cargo features)
+
+- Default: `PriceLevelFifo` (linked FIFO with `head/tail` node IDs)
+- Alternative: `PriceLevelVecDeque` (`VecDeque<OrderEvent>` queue per price level)
+
+Build with the alternative implementation:
+
+```bash
+cargo test -p order-book --no-default-features --features PriceLevelVecDeque
+```
+
 
 ## TODO List
 
