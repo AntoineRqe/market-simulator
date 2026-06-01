@@ -9,7 +9,6 @@ use utils::market_name;
 use super::OrderBook;
 
 pub(super) type OrderRef = OrderEvent;
-const PRICE_LEVEL_PREALLOC: usize = 100_000;
 
 #[derive(Debug, Clone)]
 pub struct PriceLevel {
@@ -19,7 +18,7 @@ pub struct PriceLevel {
 impl Default for PriceLevel {
     fn default() -> Self {
         Self {
-            orders: VecDeque::with_capacity(PRICE_LEVEL_PREALLOC),
+            orders: VecDeque::new(),
         }
     }
 }

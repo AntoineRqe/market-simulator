@@ -47,6 +47,11 @@ name = "perf_order_deletion_with_depth"
 harness = false
 path = "tests/perf/order_deletion_with_depth.rs"
 
+[[test]]
+name = "perf_order_deletion_same_price_depth"
+harness = false
+path = "tests/perf/order_deletion_same_price_depth.rs"
+
 [profile.profiling]
 inherits = "release"
 debug = true

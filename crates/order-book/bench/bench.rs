@@ -28,6 +28,9 @@ const LATENCY_ITERS: u64 = 10_000;
 /// Messages per Criterion iteration for the throughput benchmark.
 /// Higher = smooths out setup overhead in the msg/s calculation.
 const THROUGHPUT_ITERS: u64 = 100_000;
+const THROUGHPUT_SAMPLE_SIZE: usize = 10;
+const THROUGHPUT_MEASUREMENT_SECONDS: u64 = 10;
+const THROUGHPUT_WARMUP_SECONDS: u64 = 1;
 
 const RB_SIZE: usize = 4096;
 
@@ -474,10 +477,185 @@ fn run_latency_delete_with_depth(iters: u64, histogram: &mut Histogram<u64>) -> 
     start.elapsed()
 }
 
+/// Measures cancellation latency on a single deep price level.
+/// Builds many orders at the same price, then repeatedly cancels a middle order
+/// so the `VecDeque` scan/remove path is exercised.
+fn run_latency_delete_same_price_depth(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
+    const BOOK_SIZE: usize = 10_000;
+    const SAME_PRICE: i64 = 123_456_000;
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let producer_core = get_cores()[PRODUCER_CORE_OFFSET % get_cores().len()];
+    let consumer_core = get_cores()[CONSUMER_CORE_OFFSET % get_cores().len()];
+    let engine_core = get_cores()[ENGINE_CORE_OFFSET % get_cores().len()];
+
+    assert!(get_cores().len() >= 2, "Need at least 2 CPU cores.");
+
+    let mut rb_rx = RingBuffer::<OrderEvent, RB_SIZE>::new();
+    let mut ts_rb = RingBuffer::<u64, RB_SIZE>::new();
+
+    let start = Instant::now();
+
+    thread::scope(|s| {
+        let (inbound_tx, inbound_rx) = rb_rx.split();
+        let (outbound_tx, outbound_rx) =
+            crossbeam_channel::unbounded::<(OrderEvent, OrderResult)>();
+        let (ts_tx, ts_rx) = ts_rb.split();
+
+        let inbound_tx = Arc::new(inbound_tx);
+        let inbound_tx_clone = Arc::clone(&inbound_tx);
+
+        let control_rx = crossbeam::channel::bounded::<order_book::OrderBookControl>(RB_SIZE);
+        let order_book = order_book::book::OrderBook::new("TEST".into());
+        let mut engine = OrderBookEngine::new(
+            inbound_rx,
+            Some(Arc::new(outbound_tx)),
+            None,
+            None,
+            control_rx.1,
+            order_book,
+            None,
+            Arc::clone(&shutdown),
+        );
+
+        let engine_handle = s.spawn(move || {
+            core_affinity::set_for_current(engine_core);
+            let _ = engine.run();
+        });
+
+        s.spawn(move || {
+            core_affinity::set_for_current(producer_core);
+
+            let mut create_ev = make_order_event();
+            create_ev.price = types::FixedPointArithmetic(SAME_PRICE);
+            let mut cancel_ev = make_cancel_event(create_ev.cl_ord_id);
+            let mut next_order_id = OrderId::from_ascii("SAMEPRICE-ORDER-00001");
+            let mut next_cancel_id = OrderId::from_ascii("SAMEPRICE-CANCEL-00001");
+            let mut live_order_ids = Vec::with_capacity(BOOK_SIZE);
+
+            for _ in 0..BOOK_SIZE {
+                let current_order_id = next_order_id;
+                next_order_id.increment();
+                live_order_ids.push(current_order_id);
+
+                create_ev.cl_ord_id = current_order_id;
+                create_ev.orig_cl_ord_id = None;
+                create_ev.order_type = types::OrderType::LimitOrder;
+                create_ev.price = types::FixedPointArithmetic(SAME_PRICE);
+
+                loop {
+                    match inbound_tx.push(create_ev) {
+                        Ok(()) => break,
+                        Err(e) => {
+                            create_ev = e;
+                            std::hint::spin_loop();
+                        }
+                    }
+                }
+            }
+
+            for _ in 0..iters {
+                let index = live_order_ids.len() / 2;
+                let order_to_cancel = live_order_ids.remove(index);
+
+                let ts = UtcTimestamp::now().to_unix_ns();
+                loop {
+                    if ts_tx.push(ts).is_ok() {
+                        break;
+                    }
+                    std::hint::spin_loop();
+                }
+
+                cancel_ev.cl_ord_id = next_cancel_id;
+                next_cancel_id.increment();
+                cancel_ev.orig_cl_ord_id = Some(order_to_cancel);
+                cancel_ev.timestamp_ms = ts;
+
+                loop {
+                    match inbound_tx.push(cancel_ev) {
+                        Ok(()) => break,
+                        Err(e) => {
+                            cancel_ev = e;
+                            std::hint::spin_loop();
+                        }
+                    }
+                }
+
+                // Keep the level deep so later cancels stay expensive.
+                let replacement_id = next_order_id;
+                next_order_id.increment();
+                live_order_ids.push(replacement_id);
+
+                create_ev.cl_ord_id = replacement_id;
+                create_ev.orig_cl_ord_id = None;
+                create_ev.order_type = types::OrderType::LimitOrder;
+                create_ev.price = types::FixedPointArithmetic(SAME_PRICE);
+                create_ev.timestamp_ms = 0;
+
+                loop {
+                    match inbound_tx.push(create_ev) {
+                        Ok(()) => break,
+                        Err(e) => {
+                            create_ev = e;
+                            std::hint::spin_loop();
+                        }
+                    }
+                }
+            }
+        });
+
+        core_affinity::set_for_current(consumer_core);
+
+        // Consume initial build-up acks.
+        for _ in 0..BOOK_SIZE {
+            loop {
+                if outbound_rx.try_recv().is_ok() {
+                    break;
+                }
+                std::hint::spin_loop();
+            }
+        }
+
+        for _ in 0..iters {
+            let send_ts = loop {
+                if let Some(ts) = ts_rx.try_pop() {
+                    break ts;
+                }
+                std::hint::spin_loop();
+            };
+
+            // First ack is the cancellation we measure.
+            loop {
+                if outbound_rx.try_recv().is_ok() {
+                    break;
+                }
+                std::hint::spin_loop();
+            }
+
+            let latency = UtcTimestamp::now().to_unix_ns().saturating_sub(send_ts);
+            histogram.record(latency).unwrap();
+
+            // Second ack is the replacement create that keeps the level deep.
+            loop {
+                if outbound_rx.try_recv().is_ok() {
+                    break;
+                }
+                std::hint::spin_loop();
+            }
+        }
+
+        shutdown.store(true, std::sync::atomic::Ordering::Release);
+        kill_engine(&inbound_tx_clone);
+        engine_handle.join().unwrap();
+    });
+
+    start.elapsed()
+}
+
 // ── throughput run ────────────────────────────────────────────────────────────
 
 /// Floods `iters` messages as fast as possible and returns elapsed wall time.
-fn run_throughput(iters: u64) -> Duration {
+fn run_throughput_batch(iters: u64) -> Duration {
     let shutdown = Arc::new(AtomicBool::new(false));
     let producer_core = get_cores()[PRODUCER_CORE_OFFSET % get_cores().len()];
     let consumer_core = get_cores()[CONSUMER_CORE_OFFSET % get_cores().len()];
@@ -552,6 +730,11 @@ fn run_throughput(iters: u64) -> Duration {
     measured_elapsed
 }
 
+/// Single throughput run for a fixed number of messages.
+fn run_throughput(iters: u64) -> Duration {
+    run_throughput_batch(iters)
+}
+
 // ── Criterion entry point ─────────────────────────────────────────────────────
 
 fn benchmark_order_book(c: &mut Criterion) {
@@ -600,11 +783,32 @@ fn benchmark_order_book(c: &mut Criterion) {
         });
     });
 
+    // ── Deletion with Deep Same-Price Level ──
+    let mut delete_same_price_depth_histogram =
+        Histogram::<u64>::new_with_bounds(1, 10_000_000, 3).expect("histogram");
+    delete_same_price_depth_histogram.auto(true);
+
+    c.bench_function("Order Book / latency / delete_same_price_depth", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                total += run_latency_delete_same_price_depth(
+                    LATENCY_ITERS,
+                    &mut delete_same_price_depth_histogram,
+                );
+            }
+            total
+        });
+    });
+
     // ── Throughput ──
     let mut tput_total_msgs: u64 = 0;
     let mut tput_total_time = Duration::ZERO;
 
     let mut group = c.benchmark_group("Order Book / throughput");
+    group.sample_size(THROUGHPUT_SAMPLE_SIZE);
+    group.warm_up_time(Duration::from_secs(THROUGHPUT_WARMUP_SECONDS));
+    group.measurement_time(Duration::from_secs(THROUGHPUT_MEASUREMENT_SECONDS));
     group.throughput(Throughput::Elements(THROUGHPUT_ITERS));
     group.bench_function("msg/s", |b| {
         b.iter_custom(|iters| {
@@ -642,6 +846,14 @@ fn benchmark_order_book(c: &mut Criterion) {
     let delete_depth_p999 = Duration::from_nanos(delete_depth_histogram.value_at_quantile(0.999));
     let delete_depth_n = delete_depth_histogram.len();
 
+    let delete_same_price_depth_p50 =
+        Duration::from_nanos(delete_same_price_depth_histogram.value_at_quantile(0.50));
+    let delete_same_price_depth_p99 =
+        Duration::from_nanos(delete_same_price_depth_histogram.value_at_quantile(0.99));
+    let delete_same_price_depth_p999 =
+        Duration::from_nanos(delete_same_price_depth_histogram.value_at_quantile(0.999));
+    let delete_same_price_depth_n = delete_same_price_depth_histogram.len();
+
     // Pre-format values so we can measure their widths and align columns.
     let create_n_str = format!("{create_n}");
     let delete_n_str = format!("{delete_n}");
@@ -655,7 +867,13 @@ fn benchmark_order_book(c: &mut Criterion) {
     let delete_depth_p50_str = format!("{}", delete_depth_p50.as_nanos());
     let delete_depth_p99_str = format!("{}", delete_depth_p99.as_nanos());
     let delete_depth_p999_str = format!("{}", delete_depth_p999.as_nanos());
+    let delete_same_price_depth_n_str = format!("{delete_same_price_depth_n}");
+    let delete_same_price_depth_p50_str = format!("{}", delete_same_price_depth_p50.as_nanos());
+    let delete_same_price_depth_p99_str = format!("{}", delete_same_price_depth_p99.as_nanos());
+    let delete_same_price_depth_p999_str = format!("{}", delete_same_price_depth_p999.as_nanos());
     let tput_str = format!("{:.3} M msg/s", msgs_per_sec as f64 / 1_000_000.0);
+    let tput_total_msgs_str = format!("{tput_total_msgs}");
+    let tput_total_time_str = format!("{:.3} s", tput_total_time.as_secs_f64());
 
     let val_w = create_p50_str
         .len()
@@ -667,13 +885,23 @@ fn benchmark_order_book(c: &mut Criterion) {
         .max(delete_depth_p50_str.len())
         .max(delete_depth_p99_str.len())
         .max(delete_depth_p999_str.len());
+    let val_w = val_w
+        .max(delete_same_price_depth_p50_str.len())
+        .max(delete_same_price_depth_p99_str.len())
+        .max(delete_same_price_depth_p999_str.len());
     let col1_w = "  Create Latency  n=".len() + create_n_str.len();
     let col1_w = col1_w
         .max("  Delete Latency  n=".len() + delete_n_str.len())
         .max("  Delete+Depth  n=".len() + delete_depth_n_str.len())
-        .max("  Throughput      ".len());
+        .max("  Delete+SamePriceDepth  n=".len() + delete_same_price_depth_n_str.len())
+        .max("  Throughput      ".len())
+        .max("    total msgs".len())
+        .max("    total time".len());
     let col2_w = "  p999  ".len() + val_w + " ns  ".len();
-    let col2_w = col2_w.max(format!("  {tput_str}  ").len());
+    let col2_w = col2_w
+        .max(format!("  {tput_str}  ").len())
+        .max(format!("  {tput_total_msgs_str}  ").len())
+        .max(format!("  {tput_total_time_str}  ").len());
     let total = col1_w + 1 + col2_w;
 
     let top = format!("┌{}┐", "─".repeat(total));
@@ -738,7 +966,37 @@ fn benchmark_order_book(c: &mut Criterion) {
         row("", &format!("  p999  {delete_depth_p999_str:>val_w$} ns"))
     );
     println!("{div2}");
+    println!(
+        "{}",
+        row(
+            &format!("  Delete+SamePriceDepth  n={delete_same_price_depth_n_str}"),
+            &format!("  p50   {delete_same_price_depth_p50_str:>val_w$} ns")
+        )
+    );
+    println!(
+        "{}",
+        row(
+            "",
+            &format!("  p99   {delete_same_price_depth_p99_str:>val_w$} ns")
+        )
+    );
+    println!(
+        "{}",
+        row(
+            "",
+            &format!("  p999  {delete_same_price_depth_p999_str:>val_w$} ns")
+        )
+    );
+    println!("{div2}");
     println!("{}", row("  Throughput", &format!("  {tput_str}")));
+    println!(
+        "{}",
+        row("    total msgs", &format!("  {tput_total_msgs_str}"))
+    );
+    println!(
+        "{}",
+        row("    total time", &format!("  {tput_total_time_str}"))
+    );
     println!("{bot}");
     println!();
 }

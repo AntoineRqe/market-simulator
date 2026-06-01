@@ -101,7 +101,7 @@ This output shows that the time spent in kernel space is mostly due to page faul
 In order to analyze the time spent in user space, we can use the profiling tool `perf` + `cargo-flamegraph` to generate flamegraphs for the order creation and deletion scenarios. This will allow us to visualize the call stack and identify any performance bottlenecks in our code.
 
 ```bash
-udo -E env CARGO_TARGET_DIR="$PWD/target-flame-vecdeque"   cargo flamegraph -p order-book   --no-default-features   --features PriceLevelVecDeque   --profile profiling   --test perf_order_creation   --output "$PWD/flamegraph-vecdeque.svg"   -- 1000000
+sudo -E env CARGO_TARGET_DIR="$PWD/target-flame-vecdeque"   cargo flamegraph -p order-book   --no-default-features   --features PriceLevelVecDeque   --profile profiling   --test perf_order_creation   --output "$PWD/flamegraph-vecdeque.svg"   -- 1000000
 ```
 
 ![Flamegraph for order creation with VecDeque](./images/vecdeque-no-optim.png)
@@ -139,30 +139,75 @@ The correct implementation should be to generate trades only if a trade occurs, 
 | Other / unresolved symbols | `[unknown]`, `[[vdso]]` | ~18–27% |
 
 We can see that the time spent in `SystemTime::now()` has been removed, and the time spent in the order map insertion and kernel memory fault handling has increased.
-
+Looking at this flamegraph, the remaining time is mostly spent in the order map insertion and kernel memory fault handling. We could keep optimizing for memory management but let's first check how the performance of the order deletion scenario is affected by this optimization.
 
 ## Benchmarking with Criterion
 
-We run Criterion benchmarks for order creation and deletion scenarios to analyze the performance of our order book implementation before and after optimization.
+We run Criterion benchmarks for order creation and deletion scenarios to analyze the performance of our order book implementation before and after optimization. The three scenarios we are going to benchmark are:
 
-### Before optimization
+- Order creation: measure the latency of creating orders in the order book, **one by one**.
+- Order deletion: measure the latency of deleting orders from the order book, **one by one**.
+- Order deletion with depth: populate the order book with a large number of orders, then measure the latency of deleting orders for various price levels and depths in the order book. Deletion are made **one by one**
+- Throughput: measure the overall throughput of the order book by simulating a high volume of order creation and deletion operations and measuring the number of operations processed per second.
 
-### After optimization
+The counter start when the order is sent to the order book FIFO and stop when Response is received by the outbound FIFO. This means that the latency metrics include the time taken for the order to be processed by the order book engine, as well as the time taken for the response to be sent back to the producer thread. 
 
-┌─────────────────────────────────────────────────┐
-│          Order Book Benchmark Summary           │
-├───────────────────────────┬─────────────────────┤
-│  Create Latency  n=5550000│  p50       1092 ns  │
-│                           │  p99       3467 ns  │
-│                           │  p999     10767 ns  │
-├───────────────────────────┼─────────────────────┤
-│  Delete Latency  n=3270000│  p50       1182 ns  │
-│                           │  p99       3407 ns  │
-│                           │  p999      8239 ns  │
-├───────────────────────────┼─────────────────────┤
-│  Delete+Depth  n=1310000  │  p50    4927487 ns  │
-│                           │  p99   35782655 ns  │
-│                           │  p999  38731775 ns  │
-├───────────────────────────┼─────────────────────┤
-│  Throughput               │  2.549 M msg/s      │
-└─────────────────────────────────────────────────┘
+The Producer and Consumer threads are pinned to separate CPU cores to minimize contention, but the assigned CPU are not isolated so other process can infer on the results. The benchmarks are run on a machine with an AMD Ryzen 9 5950X CPU (16 cores, 32 threads) and 64 GB of RAM.
+
+Each benchmark is run for a total of 10 iterations, and the results are averaged to get the final latency and throughput metrics. The latency metrics are reported in nanoseconds (ns) for the p50, p99, and p999 percentiles, while the throughput is reported in millions of messages per second (M msg/s).
+
+### Comparison of performance metrics before and after optimization
+
+| Metric | Before | After | Δ % (After vs Before) |
+|---|---:|---:|---:|
+| Create latency p50 (ns) | 1092 | 1092 | 0.00% |
+| Create latency p99 (ns) | 3377 | 3467 | +2.66% |
+| Create latency p999 (ns) | 12159 | 10767 | -11.45% |
+| Delete latency p50 (ns) | 1202 | 1182 | -1.66% |
+| Delete latency p99 (ns) | 3327 | 3407 | +2.40% |
+| Delete latency p999 (ns) | 8015 | 8239 | +2.79% |
+| Delete+Depth latency p50 (ns) | 5,386,239 | 4,927,487 | -8.52% |
+| Delete+Depth latency p99 (ns) | 39,157,759 | 35,782,655 | -8.62% |
+| Delete+Depth latency p999 (ns) | 45,121,535 | 38,731,775 | -14.16% |
+| Throughput (M msg/s) | 2.387 | 2.549 | **+6.79%** |
+
+The latency metrics are not significantly affected by the optimization, because we only send one other at a time.
+
+However, the throughput has improved by approximately 6.79%, mostly due to reduction in `OrderResult` creation we had optimized.
+
+The latency for delete with depth scenario is really bad compared to single delete scenario. Our intuition tells us that deleting orders with depth is expensive because we have to look for the correct order in the `VecDeque`. One way to confirm this is to use `perf record` on both delete and delete with depth scenarios and perform a differential analysis.
+
+```bash
+sudo perf diff delete.data depth.data
+# Event 'cycles:P'
+#
+# Baseline  Delta Abs  Shared Object                                    Symbol                                                                                                                                                       >
+# ........  .........  ...............................................  .............................................................................................................................................................>
+#
+              +33.98%  perf_order_deletion_with_depth-5017784401422df1  [.] core::hash::BuildHasher::hash_one
+               +9.58%  perf_order_deletion_with_depth-5017784401422df1  [.] order_book::book::OrderBook::process_order
+               +7.93%  perf_order_deletion_with_depth-5017784401422df1  [.] perf_order_deletion_with_depth::main
+               +5.52%  perf_order_deletion_with_depth-5017784401422df1  [.] <std::hash::random::DefaultHasher as core::hash::Hasher>::write
+     3.37%     -3.27%  libc.so.6                                        [.] clock_gettime@@GLIBC_2.17
+     4.50%     +1.94%  [kernel.kallsyms]                                [k] clear_page_erms
+               +1.79%  perf_order_deletion_with_depth-5017784401422df1  [.] order_book::book::book_vecdeque::<impl order_book::book::OrderBook>::add_resting_order
+     1.86%     +1.77%  libc.so.6                                        [.] __memmove_avx512_unaligned_erms
+               +1.65%  perf_order_deletion_with_depth-5017784401422df1  [.] alloc::collections::btree::map::BTreeMap<K,V,A>::remove
+               +1.40%  perf_order_deletion_with_depth-5017784401422df1  [.] order_book::book::book_vecdeque::<impl order_book::book::OrderBook>::process_buy_limit_order
+               +1.27%  perf_order_deletion_with_depth-5017784401422df1  [.] hashbrown::map::HashMap<K,V,S,A>::insert
+               +0.89%  perf_order_deletion_with_depth-5017784401422df1  [.] hashbrown::map::HashMap<K,V,S,A>::remove
+               +0.77%  perf_order_deletion_with_depth-5017784401422df1  [.] alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut,K,V,alloc::collections::btr>
+     0.33%     +0.63%  [kernel.kallsyms]                                [k] zap_present_ptes.constprop.0
+     0.19%     +0.56%  [kernel.kallsyms]                                [k] srso_alias_safe_ret
+```
+
+
+The important results from this differential analysis are:
+
+- The `core::hash::BuildHasher::hash_one` ( +*33,98%** ) function is significantly more expensive in the delete with depth scenario, which suggests that the hash map operations (insertion and deletion) are more costly when we have to look for the correct order in the `VecDeque`.
+- The `order_book::book::OrderBook::process_order` ( +*9,58%** ) function is also more expensive
+- The `DefaultHasher::write` ( +*5,52%** ) function is more expensive, which suggests that the hashing of the order ID is more costly when we have to look for the correct order in the `VecDeque`.
+
+This results clearly leads us to the next optimization phase: 
+
+Replace the HashMap by an other data structure to prevent hash operations during order deletion. We will discuss this optimization in the next part of this paper.
