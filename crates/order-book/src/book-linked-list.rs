@@ -1,9 +1,4 @@
-use std::collections::BTreeMap;
-
-use types::{
-    FixedPointArithmetic, OrderEvent, OrderResult, OrderStatus, OrderType, Side, Trade, Trades,
-    macros::OrderId,
-};
+use types::{FixedPointArithmetic, OrderEvent, OrderResult, OrderStatus, Side, Trade, Trades};
 use utils::market_name;
 
 use super::OrderBook;
@@ -77,8 +72,14 @@ impl OrderBook {
     }
 
     pub(super) fn head_node_id(&self, side: Side, price: FixedPointArithmetic) -> Option<NodeId> {
-        self.levels(side)
-            .get(&price)
+        let price_idx = Self::price_to_index(price)?;
+        let levels = match side {
+            Side::Buy => &self.bids,
+            Side::Sell => &self.asks,
+        };
+        levels
+            .get(price_idx)
+            .and_then(|opt| opt.as_ref())
             .and_then(PriceLevel::head_node_id)
     }
 
@@ -98,10 +99,24 @@ impl OrderBook {
         side: Side,
         price: FixedPointArithmetic,
         order: OrderEvent,
-    ) -> NodeId {
+    ) -> Option<NodeId> {
+        let price_idx = match Self::price_to_index(price) {
+            Some(i) => i,
+            None => {
+                tracing::warn!("Price {:?} out of range for Vec indexing", price);
+                return None;
+            }
+        };
         let node_id = self.alloc_node(order);
+
+        let levels = match side {
+            Side::Buy => &mut self.bids,
+            Side::Sell => &mut self.asks,
+        };
+        let is_new_level = levels[price_idx].is_none();
+
         let prev_tail = {
-            let level = self.levels_mut(side).entry(price).or_default();
+            let level = levels[price_idx].get_or_insert_with(PriceLevel::default);
             let prev_tail = level.tail;
             if level.head.is_none() {
                 level.head = Some(node_id);
@@ -116,7 +131,11 @@ impl OrderBook {
             self.node_mut(node_id).prev = Some(prev_id);
         }
 
-        node_id
+        if is_new_level {
+            self.push_price_level(side, price);
+        }
+
+        Some(node_id)
     }
 
     fn unlink_node(
@@ -125,6 +144,11 @@ impl OrderBook {
         price: FixedPointArithmetic,
         node_id: NodeId,
     ) -> Option<OrderEvent> {
+        let price_idx = match Self::price_to_index(price) {
+            Some(i) => i,
+            None => return None,
+        };
+
         let (order, remove_level) = {
             let node = self.nodes.get_mut(node_id)?.take()?;
             let prev = node.prev;
@@ -139,9 +163,12 @@ impl OrderBook {
             }
 
             let remove_level = {
-                let level = self
-                    .levels_mut(side)
-                    .get_mut(&price)
+                let levels = match side {
+                    Side::Buy => &mut self.bids,
+                    Side::Sell => &mut self.asks,
+                };
+                let level = levels[price_idx]
+                    .as_mut()
                     .expect("price level missing for node");
                 if level.head == Some(node_id) {
                     level.head = next;
@@ -157,7 +184,12 @@ impl OrderBook {
         };
 
         if remove_level {
-            self.levels_mut(side).remove(&price);
+            let levels = match side {
+                Side::Buy => &mut self.bids,
+                Side::Sell => &mut self.asks,
+            };
+            levels[price_idx] = None;
+            self.prune_price_heap(side);
         }
 
         self.free_nodes.push(node_id);
@@ -165,7 +197,9 @@ impl OrderBook {
     }
 
     pub(super) fn add_resting_order(&mut self, order: OrderEvent) {
-        let node_id = self.append_order(order.side, order.price, order);
+        let Some(node_id) = self.append_order(order.side, order.price, order) else {
+            return;
+        };
         self.order_map.insert(
             order.cl_ord_id,
             OrderRef::new(order.side, order.price, node_id),
@@ -261,9 +295,13 @@ impl OrderBook {
         )
     }
 
-    pub(super) fn process_sell_limit_order(&mut self, order: OrderEvent) -> (OrderEvent, OrderResult) {
+    pub(super) fn process_sell_limit_order(
+        &mut self,
+        order: OrderEvent,
+    ) -> (OrderEvent, OrderResult) {
         let mut remaining_quantity = order.quantity;
         let mut trades: Option<Trades<4>> = None;
+        self.prune_price_heap(Side::Buy);
         while let Some(best_bid_price) = self.best_price(Side::Buy) {
             if best_bid_price < order.price {
                 break;
@@ -311,7 +349,7 @@ impl OrderBook {
             }
         }
 
-        let order_result = self.generate_order_result(order, trades);
+        let (order, order_result) = self.generate_order_result(order, trades);
 
         if remaining_quantity > FixedPointArithmetic::ZERO {
             let mut resting_order = order;
@@ -319,12 +357,16 @@ impl OrderBook {
             self.add_resting_order(resting_order);
         }
 
-        order_result
+        (order, order_result)
     }
 
-    pub(super) fn process_buy_limit_order(&mut self, order: OrderEvent) -> (OrderEvent, OrderResult) {
+    pub(super) fn process_buy_limit_order(
+        &mut self,
+        order: OrderEvent,
+    ) -> (OrderEvent, OrderResult) {
         let mut remaining_quantity = order.quantity;
         let mut trades: Option<Trades<4>> = None;
+        self.prune_price_heap(Side::Sell);
         while let Some(best_ask_price) = self.best_price(Side::Sell) {
             if best_ask_price > order.price {
                 break;
@@ -384,13 +426,17 @@ impl OrderBook {
     }
 
     pub fn get_best_bid(&self) -> Option<&OrderEvent> {
-        let (_price, level) = self.bids.last_key_value()?;
+        let price = self.best_price(Side::Buy)?;
+        let idx = Self::price_to_index(price)?;
+        let level = self.bids.get(idx)?.as_ref()?;
         let node_id = level.head_node_id()?;
         Some(&self.node(node_id).order)
     }
 
     pub fn get_best_ask(&self) -> Option<&OrderEvent> {
-        let (_price, level) = self.asks.first_key_value()?;
+        let price = self.best_price(Side::Sell)?;
+        let idx = Self::price_to_index(price)?;
+        let level = self.asks.get(idx)?.as_ref()?;
         let node_id = level.head_node_id()?;
         Some(&self.node(node_id).order)
     }

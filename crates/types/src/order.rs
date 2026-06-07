@@ -4,6 +4,8 @@ use crate::{EntityId, OrderId, SymbolId};
 use std::cmp::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub const TICK_SIZE: i64 = 1; // Define a constant tick size for price increments, can be adjusted as needed
+
 // ---------------------------------------
 // ---- Order and related types ----
 // ---------------------------------------

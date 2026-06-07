@@ -1,13 +1,22 @@
 use std::iter::Sum;
 
-/// Price represented as integer with implicit 8 decimal places
-/// e.g. 123.45678900 -> 12_345_678_900
+/// Price represented as integer with implicit decimal places based on SCALE.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FixedPointArithmetic(pub i64);
 
 impl FixedPointArithmetic {
     pub const ZERO: FixedPointArithmetic = FixedPointArithmetic(0);
-    pub const SCALE: i64 = 100_000_000; // 10^8
+    pub const SCALE: i64 = 100;
+
+    fn fraction_digits() -> u32 {
+        let mut scale = Self::SCALE;
+        let mut digits = 0;
+        while scale > 1 {
+            digits += 1;
+            scale /= 10;
+        }
+        digits
+    }
 
     pub fn from_fix_bytes(bytes: &[u8]) -> Option<Self> {
         // parse "123.45678900" without any float conversion
@@ -28,7 +37,7 @@ impl FixedPointArithmetic {
                 b'0'..=b'9' => {
                     let d = (bytes[i] - b'0') as i64;
                     if in_frac {
-                        if frac_digits < 8 {
+                        if frac_digits < Self::fraction_digits() as i64 {
                             frac_part = frac_part * 10 + d;
                             frac_digits += 1;
                         }
@@ -44,9 +53,7 @@ impl FixedPointArithmetic {
             i += 1;
         }
 
-        // pad fractional part to 8 digits
-        // e.g. "123.45" -> frac_part=45, frac_digits=2 -> pad by 10^6
-        let scale = 10_i64.pow((8 - frac_digits) as u32);
+        let scale = 10_i64.pow((Self::fraction_digits() as i64 - frac_digits) as u32);
         let raw = integer_part * Self::SCALE + frac_part * scale;
 
         Some(FixedPointArithmetic(if negative { -raw } else { raw }))
@@ -76,8 +83,11 @@ impl FixedPointArithmetic {
         buf[i] = b'.';
         i += 1;
 
-        // Write fractional part, zero-padded to 8 digits
-        let frac_str = format!("{:08}", frac_part);
+        let frac_str = format!(
+            "{:0width$}",
+            frac_part,
+            width = Self::fraction_digits() as usize
+        );
         for b in frac_str.as_bytes() {
             buf[i] = *b;
             i += 1;
@@ -178,6 +188,12 @@ impl std::fmt::Display for FixedPointArithmetic {
         let raw = self.0;
         let integer_part = raw / Self::SCALE;
         let frac_part = (raw.abs() % Self::SCALE) as u64;
-        write!(f, "{}.{:08}", integer_part, frac_part)
+        write!(
+            f,
+            "{}.{:0width$}",
+            integer_part,
+            frac_part,
+            width = Self::fraction_digits() as usize
+        )
     }
 }

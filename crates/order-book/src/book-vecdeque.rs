@@ -8,7 +8,17 @@ use utils::market_name;
 
 use super::OrderBook;
 
-pub(super) type OrderRef = OrderEvent;
+#[derive(Debug, Clone, Copy)]
+pub(super) struct OrderRef {
+    pub(super) side: Side,
+    pub(super) price: FixedPointArithmetic,
+}
+
+impl OrderRef {
+    pub(super) fn new(side: Side, price: FixedPointArithmetic) -> Self {
+        Self { side, price }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct PriceLevel {
@@ -34,9 +44,24 @@ impl OrderBook {
         level.orders.iter().copied().collect()
     }
 
-    fn append_order(&mut self, side: Side, price: FixedPointArithmetic, order: OrderEvent) {
-        let level = self.levels_mut(side).entry(price).or_default();
-        level.orders.push_back(order);
+    fn append_order(&mut self, side: Side, price: FixedPointArithmetic, order: OrderEvent) -> bool {
+        let idx = match Self::price_to_index(price) {
+            Some(i) => i,
+            None => return false, // Silently ignore out-of-range prices
+        };
+
+        let levels = self.levels_mut(side);
+        let is_new_level = levels[idx].is_none();
+        if levels[idx].is_none() {
+            levels[idx] = Some(PriceLevel::default());
+        }
+        if let Some(level) = &mut levels[idx] {
+            level.orders.push_back(order);
+        }
+        if is_new_level {
+            self.push_price_level(side, price);
+        }
+        true
     }
 
     fn unlink_order_by_id(
@@ -45,26 +70,34 @@ impl OrderBook {
         price: FixedPointArithmetic,
         cl_ord_id: OrderId,
     ) -> Option<OrderEvent> {
+        let idx = Self::price_to_index(price)?;
+        let levels = self.levels_mut(side);
+
         let (order, remove_level) = {
-            let level = self
-                .levels_mut(side)
-                .get_mut(&price)
-                .expect("price level missing for order");
-            let pos = level.orders.iter().position(|order| order.cl_ord_id == cl_ord_id)?;
+            let level = levels.get_mut(idx)?.as_mut()?;
+            let pos = level
+                .orders
+                .iter()
+                .position(|order| order.cl_ord_id == cl_ord_id)?;
             let order = level.orders.remove(pos)?;
             (order, level.orders.is_empty())
         };
 
         if remove_level {
-            self.levels_mut(side).remove(&price);
+            levels[idx] = None;
+            self.prune_price_heap(side);
         }
 
         Some(order)
     }
 
     pub(super) fn add_resting_order(&mut self, order: OrderEvent) {
-        self.append_order(order.side, order.price, order);
-        self.order_map.insert(order.cl_ord_id, order);
+        let appended = self.append_order(order.side, order.price, order);
+        if !appended {
+            return;
+        }
+        self.order_map
+            .insert(order.cl_ord_id, OrderRef::new(order.side, order.price));
         tracing::debug!(
             "[{}][{}][{}] Added order with ID: {}, side: {:?}, price: {} to order map",
             market_name(),
@@ -126,9 +159,13 @@ impl OrderBook {
         )
     }
 
-    pub(super) fn process_sell_limit_order(&mut self, order: OrderEvent) -> (OrderEvent, OrderResult) {
+    pub(super) fn process_sell_limit_order(
+        &mut self,
+        order: OrderEvent,
+    ) -> (OrderEvent, OrderResult) {
         let mut remaining_quantity = order.quantity;
         let mut trades: Option<Trades<4>> = None;
+        self.prune_price_heap(Side::Buy);
 
         while let Some(best_bid_price) = self.best_price(Side::Buy) {
             if best_bid_price < order.price {
@@ -136,9 +173,15 @@ impl OrderBook {
             }
 
             while remaining_quantity > FixedPointArithmetic::ZERO {
+                let best_bid_idx = match Self::price_to_index(best_bid_price) {
+                    Some(i) => i,
+                    None => break,
+                };
+
                 let best_bid = match self
                     .bids
-                    .get(&best_bid_price)
+                    .get(best_bid_idx)
+                    .and_then(|opt| opt.as_ref())
                     .and_then(|level| level.head_order())
                     .copied()
                 {
@@ -153,7 +196,8 @@ impl OrderBook {
                 let (maker_leaves_qty, remove_level) = {
                     let level = self
                         .bids
-                        .get_mut(&best_bid_price)
+                        .get_mut(best_bid_idx)
+                        .and_then(|opt| opt.as_mut())
                         .expect("best bid level missing during match");
                     let maker = level
                         .orders
@@ -168,7 +212,8 @@ impl OrderBook {
                 };
 
                 if remove_level {
-                    self.bids.remove(&best_bid_price);
+                    self.bids[best_bid_idx] = None;
+                    self.prune_price_heap(Side::Buy);
                 }
 
                 if maker_leaves_qty == FixedPointArithmetic::ZERO {
@@ -200,7 +245,7 @@ impl OrderBook {
             }
         }
 
-        let order_result = self.generate_order_result(order, trades);
+        let (order, order_result) = self.generate_order_result(order, trades);
 
         if remaining_quantity > FixedPointArithmetic::ZERO {
             let mut resting_order = order;
@@ -208,21 +253,31 @@ impl OrderBook {
             self.add_resting_order(resting_order);
         }
 
-        order_result
+        (order, order_result)
     }
 
-    pub(super) fn process_buy_limit_order(&mut self, order: OrderEvent) -> (OrderEvent, OrderResult) {
+    pub(super) fn process_buy_limit_order(
+        &mut self,
+        order: OrderEvent,
+    ) -> (OrderEvent, OrderResult) {
         let mut remaining_quantity = order.quantity;
         let mut trades: Option<Trades<4>> = None;
+        self.prune_price_heap(Side::Sell);
         while let Some(best_ask_price) = self.best_price(Side::Sell) {
             if best_ask_price > order.price {
                 break;
             }
 
             while remaining_quantity > FixedPointArithmetic::ZERO {
+                let best_ask_idx = match Self::price_to_index(best_ask_price) {
+                    Some(i) => i,
+                    None => break,
+                };
+
                 let best_ask = match self
                     .asks
-                    .get(&best_ask_price)
+                    .get(best_ask_idx)
+                    .and_then(|opt| opt.as_ref())
                     .and_then(|level| level.head_order())
                     .copied()
                 {
@@ -237,7 +292,8 @@ impl OrderBook {
                 let (maker_leaves_qty, remove_level) = {
                     let level = self
                         .asks
-                        .get_mut(&best_ask_price)
+                        .get_mut(best_ask_idx)
+                        .and_then(|opt| opt.as_mut())
                         .expect("best ask level missing during match");
                     let maker = level
                         .orders
@@ -252,7 +308,8 @@ impl OrderBook {
                 };
 
                 if remove_level {
-                    self.asks.remove(&best_ask_price);
+                    self.asks[best_ask_idx] = None;
+                    self.prune_price_heap(Side::Sell);
                 }
 
                 if maker_leaves_qty == FixedPointArithmetic::ZERO {
@@ -296,12 +353,14 @@ impl OrderBook {
     }
 
     pub fn get_best_bid(&self) -> Option<&OrderEvent> {
-        let (_price, level) = self.bids.last_key_value()?;
-        level.head_order()
+        let price = self.best_price(Side::Buy)?;
+        let idx = Self::price_to_index(price)?;
+        self.bids.get(idx)?.as_ref()?.orders.front()
     }
 
     pub fn get_best_ask(&self) -> Option<&OrderEvent> {
-        let (_price, level) = self.asks.first_key_value()?;
-        level.head_order()
+        let price = self.best_price(Side::Sell)?;
+        let idx = Self::price_to_index(price)?;
+        self.asks.get(idx)?.as_ref()?.orders.front()
     }
 }

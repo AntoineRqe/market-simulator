@@ -1,6 +1,7 @@
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use hdrhistogram::Histogram;
 use order_book::engine::OrderBookEngine;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::thread;
@@ -532,10 +533,12 @@ fn run_latency_delete_same_price_depth(iters: u64, histogram: &mut Histogram<u64
             let mut next_order_id = OrderId::from_ascii("SAMEPRICE-ORDER-00001");
             let mut next_cancel_id = OrderId::from_ascii("SAMEPRICE-CANCEL-00001");
             let mut live_order_ids = Vec::with_capacity(BOOK_SIZE);
+            let mut live_order_indices = HashMap::with_capacity(BOOK_SIZE * 2);
 
             for _ in 0..BOOK_SIZE {
                 let current_order_id = next_order_id;
                 next_order_id.increment();
+                live_order_indices.insert(current_order_id, live_order_ids.len());
                 live_order_ids.push(current_order_id);
 
                 create_ev.cl_ord_id = current_order_id;
@@ -556,7 +559,12 @@ fn run_latency_delete_same_price_depth(iters: u64, histogram: &mut Histogram<u64
 
             for _ in 0..iters {
                 let index = live_order_ids.len() / 2;
-                let order_to_cancel = live_order_ids.remove(index);
+                let order_to_cancel = live_order_ids.swap_remove(index);
+                live_order_indices.remove(&order_to_cancel);
+                if index < live_order_ids.len() {
+                    let moved_order_id = live_order_ids[index];
+                    live_order_indices.insert(moved_order_id, index);
+                }
 
                 let ts = UtcTimestamp::now().to_unix_ns();
                 loop {
@@ -584,6 +592,7 @@ fn run_latency_delete_same_price_depth(iters: u64, histogram: &mut Histogram<u64
                 // Keep the level deep so later cancels stay expensive.
                 let replacement_id = next_order_id;
                 next_order_id.increment();
+                live_order_indices.insert(replacement_id, live_order_ids.len());
                 live_order_ids.push(replacement_id);
 
                 create_ev.cl_ord_id = replacement_id;

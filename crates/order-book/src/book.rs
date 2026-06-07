@@ -1,6 +1,10 @@
-use std::collections::{BTreeMap, HashMap};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
-use types::{FixedPointArithmetic, OrderEvent, OrderResult, OrderStatus, OrderType, Side, Trades, macros::OrderId};
+use types::{
+    FixedPointArithmetic, OrderEvent, OrderResult, OrderStatus, OrderType, Side, Trades,
+    macros::OrderId,
+};
 
 #[cfg(all(feature = "PriceLevelVecDeque", feature = "PriceLevelFifo"))]
 compile_error!(
@@ -9,35 +13,41 @@ compile_error!(
 #[cfg(not(any(feature = "PriceLevelVecDeque", feature = "PriceLevelFifo")))]
 compile_error!("Either `PriceLevelVecDeque` or `PriceLevelFifo` must be enabled");
 
-#[cfg(feature = "PriceLevelVecDeque")]
-#[path = "book-vecdeque.rs"]
-mod book_vecdeque;
 #[cfg(feature = "PriceLevelFifo")]
 #[path = "book-linked-list.rs"]
 mod book_linked_list;
-
 #[cfg(feature = "PriceLevelVecDeque")]
-pub use self::book_vecdeque::PriceLevel;
+#[path = "book-vecdeque.rs"]
+mod book_vecdeque;
+
 #[cfg(feature = "PriceLevelFifo")]
 pub use self::book_linked_list::PriceLevel;
-
 #[cfg(feature = "PriceLevelVecDeque")]
-use self::book_vecdeque::OrderRef;
+pub use self::book_vecdeque::PriceLevel;
+
 #[cfg(feature = "PriceLevelFifo")]
 use self::book_linked_list::{Node, NodeId, OrderRef};
+#[cfg(feature = "PriceLevelVecDeque")]
+use self::book_vecdeque::OrderRef;
 
-/// Represents the order book, maintaining separate heaps for bids and asks.
-/// Bids are stored in a max-heap (higher prices have priority), while asks are stored in a min-heap (lower prices have priority).
+/// Maximum price level = 1000 with 1 decimal precision (SCALE = 10)
+/// Capacity = 1000 * 100 to index by raw i64 value (price * SCALE)
+const MAX_PRICE_RAW: i64 = 1000 * FixedPointArithmetic::SCALE; // 1000 * 10 = 10000
+const PRICE_CAPACITY: usize = (MAX_PRICE_RAW + 1) as usize;
+
+/// Represents the order book, maintaining separate arrays for bids and asks indexed by price.
+/// Bids and asks are stored in Vec<Option<PriceLevel>> where the index corresponds to the raw price value.
 /// The order book processes incoming orders, matches them against existing orders, and updates the order book accordingly.
-/// - `bids`: A binary heap containing buy orders, sorted by price in descending order.
-/// - `asks`: A binary heap containing sell orders, sorted by price in ascending order (using `Reverse` to achieve min-heap behavior).
-/// - `trade_id_counter`: A counter used to generate unique trade IDs for matched orders.
 #[derive(Debug)]
 pub struct OrderBook {
-    /// Bids are stored in a BTreeMap where the key is the price and the value is a linked FIFO level.
-    pub bids: BTreeMap<FixedPointArithmetic, PriceLevel>,
-    /// Asks are stored in a BTreeMap where the key is the price and the value is a linked FIFO level.
-    pub asks: BTreeMap<FixedPointArithmetic, PriceLevel>,
+    /// Bids are stored in a Vec<Option<PriceLevel>> indexed by price (raw i64 value).
+    pub bids: Vec<Option<PriceLevel>>,
+    /// Asks are stored in a Vec<Option<PriceLevel>> indexed by price (raw i64 value).
+    pub asks: Vec<Option<PriceLevel>>,
+    /// Max-heap of bid price indices for O(log n) insert and O(1) best bid lookup.
+    bid_price_heap: BinaryHeap<usize>,
+    /// Min-heap of ask price indices for O(log n) insert and O(1) best ask lookup.
+    ask_price_heap: BinaryHeap<Reverse<usize>>,
     /// Internal counter for generating unique order IDs for incoming orders. This is used to assign an internal order ID to each order as it is processed, which can be useful for tracking and referencing orders within the order book.
     pub(crate) internal_id_counter: u64,
     /// Counter for generating unique trade IDs for matched orders. Each time a trade is executed, a new trade ID is generated using this counter to ensure that each trade can be uniquely identified and tracked.
@@ -55,30 +65,49 @@ pub struct OrderBook {
 impl std::fmt::Display for OrderBook {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Ask")?;
-        for ask in self.asks.iter() {
-            write!(f, "\n{}", ask.0)?;
+        for (idx, level_opt) in self.asks.iter().enumerate() {
+            if let Some(_level) = level_opt {
+                write!(f, "\n{}", idx)?;
+            }
         }
         write!(f, "\nBid")?;
-        for bid in self.bids.iter().rev() {
-            write!(f, "\n{}", bid.0)?;
+        for (idx, level_opt) in self.bids.iter().enumerate().rev() {
+            if let Some(_level) = level_opt {
+                write!(f, "\n{}", idx)?;
+            }
         }
         Ok(())
     }
 }
+
 impl OrderBook {
+    fn price_to_index(price: FixedPointArithmetic) -> Option<usize> {
+        let raw = price.raw();
+        if raw >= 0 && (raw as usize) < PRICE_CAPACITY {
+            Some(raw as usize)
+        } else {
+            None
+        }
+    }
+
+    fn index_to_price(idx: usize) -> FixedPointArithmetic {
+        FixedPointArithmetic::from_raw(idx as i64)
+    }
+
     pub fn new(symbol: &str) -> Self {
         OrderBook {
-            // Arbitrary initial capacity for the heaps to avoid frequent resizing; can be adjusted based on expected order volume.
-            bids: BTreeMap::new(),
-            asks: BTreeMap::new(),
-            internal_id_counter: 1, // Start at 1; 0 is reserved as the sentinel "no ID" value
-            trade_id_counter: 1,    // Start at 1; 0 is reserved as the sentinel "no ID" value
+            bids: vec![None; PRICE_CAPACITY],
+            asks: vec![None; PRICE_CAPACITY],
+            bid_price_heap: BinaryHeap::new(),
+            ask_price_heap: BinaryHeap::new(),
+            internal_id_counter: 1,
+            trade_id_counter: 1,
             #[cfg(feature = "PriceLevelFifo")]
             nodes: Vec::new(),
             #[cfg(feature = "PriceLevelFifo")]
             free_nodes: Vec::new(),
-            order_map: HashMap::new(),  // Initialize the order map
-            symbol: symbol.to_string(), // Set the symbol for this order book
+            order_map: HashMap::new(),
+            symbol: symbol.to_string(),
         }
     }
 
@@ -98,34 +127,124 @@ impl OrderBook {
         id
     }
 
-    fn levels(&self, side: Side) -> &BTreeMap<FixedPointArithmetic, PriceLevel> {
+    fn levels(&self, side: Side) -> &Vec<Option<PriceLevel>> {
         match side {
             Side::Buy => &self.bids,
             Side::Sell => &self.asks,
         }
     }
 
-    fn levels_mut(&mut self, side: Side) -> &mut BTreeMap<FixedPointArithmetic, PriceLevel> {
+    #[cfg(feature = "PriceLevelVecDeque")]
+    fn levels_mut(&mut self, side: Side) -> &mut Vec<Option<PriceLevel>> {
         match side {
             Side::Buy => &mut self.bids,
             Side::Sell => &mut self.asks,
         }
     }
 
-    // TODO: This function is called multiple times during order matching, we can optimize it by caching the best price for each side and only updating it when the best price level is modified.
+    pub(super) fn push_price_level(&mut self, side: Side, price: FixedPointArithmetic) {
+        if let Some(idx) = Self::price_to_index(price) {
+            match side {
+                Side::Buy => self.bid_price_heap.push(idx),
+                Side::Sell => self.ask_price_heap.push(Reverse(idx)),
+            }
+        }
+    }
+
+    pub(super) fn prune_price_heap(&mut self, side: Side) {
+        match side {
+            Side::Buy => {
+                while let Some(&idx) = self.bid_price_heap.peek() {
+                    if self.bids.get(idx).is_some_and(|level| level.is_some()) {
+                        break;
+                    }
+                    self.bid_price_heap.pop();
+                }
+            }
+            Side::Sell => {
+                while let Some(&Reverse(idx)) = self.ask_price_heap.peek() {
+                    if self.asks.get(idx).is_some_and(|level| level.is_some()) {
+                        break;
+                    }
+                    self.ask_price_heap.pop();
+                }
+            }
+        }
+    }
+
     fn best_price(&self, side: Side) -> Option<FixedPointArithmetic> {
         match side {
-            Side::Buy => self.bids.last_key_value().map(|(&price, _)| price),
-            Side::Sell => self.asks.first_key_value().map(|(&price, _)| price),
+            Side::Buy => self
+                .bid_price_heap
+                .peek()
+                .map(|idx| Self::index_to_price(*idx)),
+            Side::Sell => self
+                .ask_price_heap
+                .peek()
+                .map(|Reverse(idx)| Self::index_to_price(*idx)),
         }
     }
 
     #[cfg(test)]
     fn price_level_orders(&self, side: Side, price: FixedPointArithmetic) -> Vec<OrderEvent> {
+        match Self::price_to_index(price) {
+            Some(idx) => self
+                .levels(side)
+                .get(idx)
+                .and_then(|opt| opt.as_ref())
+                .map(|level| self.collect_level_orders(level))
+                .unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn levels_are_empty(&self, side: Side) -> bool {
         self.levels(side)
-            .get(&price)
-            .map(|level| self.collect_level_orders(level))
-            .unwrap_or_default()
+            .iter()
+            .all(|level_opt| level_opt.is_none())
+    }
+
+    #[cfg(test)]
+    fn active_level_count(&self, side: Side) -> usize {
+        self.levels(side)
+            .iter()
+            .filter(|level_opt| level_opt.is_some())
+            .count()
+    }
+
+    #[cfg(test)]
+    fn get_best_price(&self, side: Side) -> Option<FixedPointArithmetic> {
+        self.best_price(side)
+    }
+
+    #[cfg(test)]
+    fn get_nth_active_price(&self, side: Side, n: usize) -> Option<FixedPointArithmetic> {
+        let levels = self.levels(side);
+        let mut count = 0;
+        match side {
+            Side::Sell => {
+                for (idx, level_opt) in levels.iter().enumerate() {
+                    if level_opt.is_some() {
+                        if count == n {
+                            return Some(Self::index_to_price(idx));
+                        }
+                        count += 1;
+                    }
+                }
+            }
+            Side::Buy => {
+                for (idx, level_opt) in levels.iter().enumerate().rev() {
+                    if level_opt.is_some() {
+                        if count == n {
+                            return Some(Self::index_to_price(idx));
+                        }
+                        count += 1;
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Processes an incoming order by determining its type (limit or market) and side (buy or sell), and then calling the appropriate processing function. The function is instrumented with tracing to provide detailed logs of the order processing steps, including the order ID, side, price, and quantity.
@@ -206,12 +325,7 @@ impl OrderBook {
         order: OrderEvent,
         trades: Option<Trades<4>>,
     ) -> (OrderEvent, OrderResult) {
-        let status = match (trades.is_some(), order.quantity) {
-            (false, _) => OrderStatus::Unmatched,
-            (true, quantity) if quantity == FixedPointArithmetic::ZERO => OrderStatus::Filled,
-            (true, _) => OrderStatus::PartiallyFilled,
-        };
-        let order_result = self.build_order_result(status, trades);
+        let order_result = self.build_order_result(OrderStatus::New, trades);
         (order, order_result)
     }
 
@@ -241,23 +355,37 @@ impl OrderBook {
     /// Arguments:
     /// - `side`: The side of the order book to dump (either `Side::Buy` for bids or `Side::Sell` for asks).
     /// Returns:
-    /// - A `Vec<OrderEvent>` containing the orders for the specified side of the order book. For bids, it returns the orders directly from the `bids` heap, and for asks, it extracts the inner `OrderEvent` from the `Reverse` wrapper in the `asks` heap.
+    /// - A `Vec<OrderEvent>` containing the orders for the specified side of the order book. For bids, it returns the orders in descending price order; for asks, it returns them in ascending price order.
     pub fn dump_order_book(&self, side: Side, depth: usize) -> Vec<OrderEvent> {
+        let mut orders = Vec::new();
+        let levels = self.levels(side);
+
         match side {
-            Side::Buy => self
-                .bids
-                .iter()
-                .rev()
-                .flat_map(|(_price, level)| self.collect_level_orders(level))
-                .take(depth)
-                .collect(),
-            Side::Sell => self
-                .asks
-                .iter()
-                .flat_map(|(_price, level)| self.collect_level_orders(level))
-                .take(depth)
-                .collect(),
+            Side::Buy => {
+                for level_opt in levels.iter().enumerate().rev() {
+                    if let (_, Some(level)) = level_opt {
+                        orders.extend(self.collect_level_orders(level));
+                        if orders.len() >= depth {
+                            orders.truncate(depth);
+                            break;
+                        }
+                    }
+                }
+            }
+            Side::Sell => {
+                for level_opt in levels.iter().enumerate() {
+                    if let (_, Some(level)) = level_opt {
+                        orders.extend(self.collect_level_orders(level));
+                        if orders.len() >= depth {
+                            orders.truncate(depth);
+                            break;
+                        }
+                    }
+                }
+            }
         }
+
+        orders
     }
 }
 
@@ -318,8 +446,8 @@ mod tests {
         assert_eq!(cancel_result.status, OrderStatus::Cancelled);
         assert_eq!(cancel_order.price, order.price); // The cancel acknowledgment should reflect the original order's price
         assert_eq!(cancel_order.quantity, order.quantity); // The cancel acknowledgment should reflect the original order's quantity
-        assert!(order_book.asks.is_empty()); // There should be no asks in the order book
-        assert!(order_book.bids.is_empty()); // There should be no bids in the order book
+        assert!(order_book.levels_are_empty(Side::Sell)); // There should be no asks in the order book
+        assert!(order_book.levels_are_empty(Side::Buy)); // There should be no bids in the order book
         assert!(order_book.order_map.is_empty()); // There should be no asks in the order book
 
         // Testing cancellation of a sell order
@@ -443,10 +571,7 @@ mod tests {
             result2.trades.unwrap()[0].price,
             FixedPointArithmetic::from_f64(100.0)
         ); // Trade price should be 100.0
-        assert_eq!(
-            result2.traded_qty(),
-            FixedPointArithmetic::from_f64(5.0)
-        ); // Total quantity should be 5.0
+        assert_eq!(result2.traded_qty(), FixedPointArithmetic::from_f64(5.0)); // Total quantity should be 5.0
         assert_eq!(
             result2.avg_trade_price(),
             FixedPointArithmetic::from_f64(100.0)
@@ -531,10 +656,7 @@ mod tests {
             result2.avg_trade_price(),
             FixedPointArithmetic::from_f64(100.0)
         ); // Average price should be 100.0
-        assert_eq!(
-            result2.traded_qty(),
-            FixedPointArithmetic::from_f64(5.0)
-        ); // Total quantity should be 5.0
+        assert_eq!(result2.traded_qty(), FixedPointArithmetic::from_f64(5.0)); // Total quantity should be 5.0
 
         // The third order should not be matched immediately, as there are no existing orders in the order book, so it should be added to the asks.
         assert_eq!(order3.price, FixedPointArithmetic::from_f64(98.0));
@@ -558,16 +680,13 @@ mod tests {
             result3.avg_trade_price(),
             FixedPointArithmetic::from_f64(100.0)
         ); // Average price should be 100.0
-        assert_eq!(
-            result3.traded_qty(),
-            FixedPointArithmetic::from_f64(5.0)
-        ); // Total quantity should be 5.0
+        assert_eq!(result3.traded_qty(), FixedPointArithmetic::from_f64(5.0)); // Total quantity should be 5.0
 
-        assert_eq!(order_book.bids.len(), 0); // One ask should remain in the order book
-        assert_eq!(order_book.asks.len(), 1); // One ask should remain in the order book
+        assert_eq!(order_book.active_level_count(Side::Buy), 0); // No bids should remain in the order book
+        assert_eq!(order_book.active_level_count(Side::Sell), 1); // One ask should remain in the order book
         assert_eq!(
-            order_book.asks.first_entry().unwrap().key(),
-            &FixedPointArithmetic::from_f64(98.0)
+            order_book.get_best_price(Side::Sell).unwrap(),
+            FixedPointArithmetic::from_f64(98.0)
         ); // The remaining ask should be the one at 98.0
         let remaining_asks =
             order_book.price_level_orders(Side::Sell, FixedPointArithmetic::from_f64(98.0));
@@ -694,15 +813,12 @@ mod tests {
             result4.avg_trade_price(),
             FixedPointArithmetic::from_f64(97.9)
         ); // Average price should be (3*97 + 5*98 + 2*99) / 10 = 98.0
-        assert_eq!(
-            result4.traded_qty(),
-            FixedPointArithmetic::from_f64(10.0)
-        ); // Total quantity should be 10.0
+        assert_eq!(result4.traded_qty(), FixedPointArithmetic::from_f64(10.0)); // Total quantity should be 10.0
 
-        assert_eq!(order_book.asks.len(), 1); // One ask should remain in the order book
+        assert_eq!(order_book.active_level_count(Side::Sell), 1); // One ask should remain in the order book
         assert_eq!(
-            order_book.asks.first_entry().unwrap().key(),
-            &FixedPointArithmetic::from_f64(99.0)
+            order_book.get_best_price(Side::Sell).unwrap(),
+            FixedPointArithmetic::from_f64(99.0)
         ); // The remaining ask should be the one at 99.0
         let remaining_asks =
             order_book.price_level_orders(Side::Sell, FixedPointArithmetic::from_f64(99.0));
@@ -716,7 +832,7 @@ mod tests {
         assert_eq!(remaining_asks[0].order_type, OrderType::LimitOrder);
         // The remaining ask should have the same order type as the first order
 
-        assert!(order_book.bids.is_empty()); // No bids should remain in the order book
+        assert!(order_book.levels_are_empty(Side::Buy)); // No bids should remain in the order book
 
         // Give time for the logs to be flushed before the test ends
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -823,10 +939,10 @@ mod tests {
         assert_eq!(result4.status, OrderStatus::New);
 
         // Check the remaining orders in the order book after processing the market order
-        assert_eq!(order_book.asks.len(), 2); // Two asks should remain in the order book
+        assert_eq!(order_book.active_level_count(Side::Sell), 2); // Two asks should remain in the order book
         assert_eq!(
-            order_book.asks.first_entry().unwrap().key(),
-            &FixedPointArithmetic::from_f64(98.0)
+            order_book.get_best_price(Side::Sell).unwrap(),
+            FixedPointArithmetic::from_f64(98.0)
         ); // The remaining ask should be the one at 98.0
         let best_remaining_asks =
             order_book.price_level_orders(Side::Sell, FixedPointArithmetic::from_f64(98.0));
@@ -839,8 +955,8 @@ mod tests {
         assert_eq!(best_remaining_asks[0].target_id, TARGET); // The remaining ask should have the same target ID as the third order
         assert_eq!(best_remaining_asks[0].order_type, OrderType::LimitOrder); // The remaining ask should have the same order type as the third order
         assert_eq!(
-            order_book.asks.iter().nth(1).unwrap().0,
-            &FixedPointArithmetic::from_f64(99.0)
+            order_book.get_nth_active_price(Side::Sell, 1).unwrap(),
+            FixedPointArithmetic::from_f64(99.0)
         ); // The second remaining ask should be the one at 99.0
         let second_remaining_asks =
             order_book.price_level_orders(Side::Sell, FixedPointArithmetic::from_f64(99.0));
