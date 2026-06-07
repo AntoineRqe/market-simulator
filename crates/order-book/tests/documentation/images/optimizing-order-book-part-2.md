@@ -33,33 +33,115 @@ This way, we can access the orders at the specific price level in constant time 
 
 The results show a significant improvement in latency for both order creation and deletion, especially when we also retrieve the depth of the order book after deletion. The throughput remains relatively unchanged, which indicates that the optimization has not negatively impacted the overall performance of the order book.
 
-This is a first step towards optimizing the order book, we will generate the flamegraph to identify the hotspots and further optimize the order book in the next part.
-
-### Flamegraph analysis
-
-![Flamegraph](./prealloc_vec.png)
-
-| Block | Percentage (approx.) |
-|---|---:|
-| `OrderMap insert` (`HashMap::insert` + `RawTable::insert_*`) | 21.35% |
-| `Memory copy` (`__memcpy_avx512_unaligned_erms`) | 18.75% |
-| `Kernel page faults` (`asm_exc_page_fault` + `handle_mm_fault` chain) | 15.85% |
-| `OrderMap remove` (`RawTable::remove_entry`) | 12.09% |
-| `Hashing` (`DefaultHasher/SipHasher::write`) | 11.46% |
-| `Anonymous page allocation` (`do_anonymous_page`) | 11.11% |
-
-The flamgraph analysis show that the main hotspots are related to the `HashMap` operations (insertion and removal), memory copying, and kernel page faults. We removed the `HashMap` for managing the orders at each price level, but there is still `HashMap` for managing the price levels as shown in this data structure:
+However, the `Delete+Depth` latency is still quite high, especially compared to the `Create` and `Delete` latencies. Let's look the function for deleting and retrieving depth to see if we can optimize it further.
 
 ```rust
-#[derive(Debug)]
-pub struct OrderBook {
-    /// Bids are stored in a Vec<Option<PriceLevel>> indexed by price (raw i64 value).
-    pub bids: Vec<Option<PriceLevel>>,
-    /// Asks are stored in a Vec<Option<PriceLevel>> indexed by price (raw i64 value).
-    pub asks: Vec<Option<PriceLevel>>,
-    /// Map to track orders by their ID for efficient cancellation and modification.
-    order_map: HashMap<OrderId, OrderRef>,
+fn unlink_order_by_id(
+    &mut self,
+    side: Side,
+    price: FixedPointArithmetic,
+    cl_ord_id: OrderId,
+) -> Option<OrderEvent> {
+    let idx = Self::price_to_index(price)?;
+    let levels = self.levels_mut(side);
+
+    let (order, remove_level) = {
+        let level = levels.get_mut(idx)?.as_mut()?;
+        let pos = level
+            .orders
+            .iter()
+            .position(|order| order.cl_ord_id == cl_ord_id)?;
+        let order = level.orders.remove(pos)?;
+        (order, level.orders.is_empty())
+    };
+
+    if remove_level {
+        levels[idx] = None;
+        self.prune_price_heap(side);
+    }
+
+    Some(order)
 }
 ```
 
-Why do we still have `HashMap` for managing the price levels? If `order_map` doesn't exist, we would have to search through the orders at each price level to find the order to delete, which would be inefficient. The `order_map` allows us to quickly find the order by its ID and then access the corresponding price level and order in constant time O(1). However, each insertion and deletion in the `HashMap` involves hashing the order ID and managing the internal structure of the `HashMap`, which can lead to performance overhead, especially when we have a large number of orders.
+To delete an order, we need to do a linear search through the orders at the specific price level to find the order with the matching `cl_ord_id`. Linear search has a time complexity of O(n). A solution could be to maintain a hash map of `cl_ord_id` to the index of the order in the array for each price level. This way, we can access the order directly in constant time O(1) without having to do a linear search. But deletion modify the order array, so we need to update the hash map accordingly.
+
+In the next part, we will implement a new data structure which aim to perform deletion in constant time O(1).
+
+## Double linked list
+
+Instead of using `VecDeque` to store the orders at each price level, we can use a double linked list. A double linked list allows us to easily add and remove orders from the list. It could look like this:
+
+```rust
+pub struct PriceLevel {
+    pub(super) head: Option<NodeId>,
+    pub(super) tail: Option<NodeId>,
+    pub(super) len: usize,
+}
+```
+
+The `NodeId` is a unique identifier for each order in the list. 
+The Node structure could look like this:
+
+```rust
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Node {
+    pub(super) order: OrderEvent,
+    pub(super) prev: Option<NodeId>,
+    pub(super) next: Option<NodeId>,
+}
+```
+
+The `Node` are stored stored in a separate structure, which allows us to easily add and remove orders from the list without having to shift elements in an array. Each Node contain a copy of the order event, and the `prev` and `next` fields are used to link the nodes together in a double linked list.
+
+To delete an order, we retrieve the `NodeId` from the hash map using the `cl_ord_id`, then we can easily unlink the node from the list by updating the `prev` and `next` pointers of the neighboring nodes. This way, we can perform deletion in constant time O(1) without having to do a linear search through the orders at the price level.
+
+After implementing the double linked list, we run the performance tests again to see the improvement in latency for order deletion.
+
+```
+┌────────────────────────────────────────────────────┐
+│            Order Book Benchmark Summary            │
+├──────────────────────────────────┬─────────────────┤
+│  Create Latency  n=5550000       │  p50   1011 ns  │
+│                                  │  p99   5751 ns  │
+│                                  │  p999  9815 ns  │
+├──────────────────────────────────┼─────────────────┤
+│  Delete Latency  n=3270000       │  p50   1052 ns  │
+│                                  │  p99   3205 ns  │
+│                                  │  p999  7243 ns  │
+├──────────────────────────────────┼─────────────────┤
+│  Delete+Depth  n=5550000         │  p50   1001 ns  │
+│                                  │  p99   3195 ns  │
+│                                  │  p999  7735 ns  │
+├──────────────────────────────────┼─────────────────┤
+│  Delete+SamePriceDepth  n=6550000│  p50    511 ns  │
+│                                  │  p99   2695 ns  │
+│                                  │  p999  6343 ns  │
+├──────────────────────────────────┼─────────────────┤
+│  Throughput                      │  2.672 M msg/s  │
+│    total msgs                    │  30600000       │
+│    total time                    │  11.451 s       │
+└────────────────────────────────────────────────────┘
+```
+
+The results show a significant improvement in latency for order deletion, especially when we also retrieve the depth of the order book after deletion. The throughput also shows a slight improvement, which indicates that the optimization has positively impacted the overall performance of the order book.
+
+### Flamegraph hotspots
+
+I run the flamegraph for the `Delete+Depth` scenario to see where the time is spent.
+
+The same-price-depth delete profile still spends most of its time in engine bookkeeping around the cancel path:
+
+| Block | Representative frames | Time spent (approx.) |
+|---|---|---:|
+| Order processing | `order_book::book::book_linked_list::<impl OrderBook>::process_buy_limit_order` | ~7.3% |
+| Queue maintenance | `alloc::vec::Vec::swap_remove` | ~6.0% |
+| Order map insertion | `ahash::hash_map::AHashMap::insert` | ~4.8% |
+| Timestamp capture | `std::sys::pal::unix::time::Timespec::now` | ~3.3% |
+| Result construction | `order_book::book::OrderBook::build_order_result` | ~2.7% |
+| Cancel handling | `order_book::book::book_linked_list::<impl OrderBook>::process_cancel_order` | ~2.1% |
+| Order map removal | `ahash::hash_map::AHashMap::remove` | ~1.4% |
+
+Note that I changed the Hash function to `ahash` which is faster than the default `SipHash` used by Rust's standard library. But why do I still need to do hash map insertion and removal for each order deletion? 
+
+This is because we need to maintain a mapping of `cl_ord_id` to `NodeId` in order to perform deletion in constant time O(1). This HashMap maintenance still represents a significant portion of the time spent in the delete path, especially when we also retrieve the depth of the order book after deletion.

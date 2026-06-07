@@ -1,34 +1,16 @@
+use ahash::AHashMap;
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use types::{
     FixedPointArithmetic, OrderEvent, OrderResult, OrderStatus, OrderType, Side, Trades,
     macros::OrderId,
 };
 
-#[cfg(all(feature = "PriceLevelVecDeque", feature = "PriceLevelFifo"))]
-compile_error!(
-    "Features `PriceLevelVecDeque` and `PriceLevelFifo` are mutually exclusive; enable only one"
-);
-#[cfg(not(any(feature = "PriceLevelVecDeque", feature = "PriceLevelFifo")))]
-compile_error!("Either `PriceLevelVecDeque` or `PriceLevelFifo` must be enabled");
-
-#[cfg(feature = "PriceLevelFifo")]
 #[path = "book-linked-list.rs"]
 mod book_linked_list;
-#[cfg(feature = "PriceLevelVecDeque")]
-#[path = "book-vecdeque.rs"]
-mod book_vecdeque;
-
-#[cfg(feature = "PriceLevelFifo")]
 pub use self::book_linked_list::PriceLevel;
-#[cfg(feature = "PriceLevelVecDeque")]
-pub use self::book_vecdeque::PriceLevel;
-
-#[cfg(feature = "PriceLevelFifo")]
 use self::book_linked_list::{Node, NodeId, OrderRef};
-#[cfg(feature = "PriceLevelVecDeque")]
-use self::book_vecdeque::OrderRef;
 
 /// Maximum price level = 1000 with 1 decimal precision (SCALE = 10)
 /// Capacity = 1000 * 100 to index by raw i64 value (price * SCALE)
@@ -52,12 +34,10 @@ pub struct OrderBook {
     pub(crate) internal_id_counter: u64,
     /// Counter for generating unique trade IDs for matched orders. Each time a trade is executed, a new trade ID is generated using this counter to ensure that each trade can be uniquely identified and tracked.
     pub(crate) trade_id_counter: u64,
-    #[cfg(feature = "PriceLevelFifo")]
     nodes: Vec<Option<Node>>,
-    #[cfg(feature = "PriceLevelFifo")]
     free_nodes: Vec<NodeId>,
     /// Map to track orders by their ID for efficient cancellation and modification.
-    order_map: HashMap<OrderId, OrderRef>,
+    order_map: AHashMap<OrderId, OrderRef>,
     /// The symbol for this order book.
     pub(crate) symbol: String,
 }
@@ -102,11 +82,9 @@ impl OrderBook {
             ask_price_heap: BinaryHeap::new(),
             internal_id_counter: 1,
             trade_id_counter: 1,
-            #[cfg(feature = "PriceLevelFifo")]
             nodes: Vec::new(),
-            #[cfg(feature = "PriceLevelFifo")]
             free_nodes: Vec::new(),
-            order_map: HashMap::new(),
+            order_map: AHashMap::new(),
             symbol: symbol.to_string(),
         }
     }
@@ -131,14 +109,6 @@ impl OrderBook {
         match side {
             Side::Buy => &self.bids,
             Side::Sell => &self.asks,
-        }
-    }
-
-    #[cfg(feature = "PriceLevelVecDeque")]
-    fn levels_mut(&mut self, side: Side) -> &mut Vec<Option<PriceLevel>> {
-        match side {
-            Side::Buy => &mut self.bids,
-            Side::Sell => &mut self.asks,
         }
     }
 
@@ -1057,3 +1027,4 @@ mod tests {
         assert_eq!(asks[0].order_type, OrderType::LimitOrder); // The ask should have the correct order type
     }
 }
+PriceLevel

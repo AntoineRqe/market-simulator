@@ -4,9 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["PriceLevelFifo"]
-PriceLevelVecDeque = []
-PriceLevelFifo = []
+default = []
 
 [dependencies]
 tracing.workspace = true
@@ -17,6 +15,7 @@ utils = { path = "../utils" }
 snapshot = { path = "../snapshot" }
 crossbeam-channel.workspace = true
 arc-swap = "1.9.1"
+ahash = "0.8"
 
 # Dev dependencies for testing
 [dev-dependencies]

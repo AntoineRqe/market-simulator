@@ -1,7 +1,7 @@
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use hdrhistogram::Histogram;
 use order_book::engine::OrderBookEngine;
-use std::collections::HashMap;
+use ahash::AHashMap;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::thread;
@@ -340,6 +340,7 @@ fn run_latency_delete(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
 /// Builds 10000 orders at various prices, then measures cancellation latency at different depths.
 fn run_latency_delete_with_depth(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
     let shutdown = Arc::new(AtomicBool::new(false));
+    let ready = Arc::new(AtomicBool::new(false));
     let producer_core = get_cores()[PRODUCER_CORE_OFFSET % get_cores().len()];
     let consumer_core = get_cores()[CONSUMER_CORE_OFFSET % get_cores().len()];
     let engine_core = get_cores()[ENGINE_CORE_OFFSET % get_cores().len()];
@@ -378,6 +379,7 @@ fn run_latency_delete_with_depth(iters: u64, histogram: &mut Histogram<u64>) -> 
             let _ = engine.run();
         });
 
+        let ready_prod = Arc::clone(&ready);
         s.spawn(move || {
             core_affinity::set_for_current(producer_core);
             let mut create_ev = make_order_event();
@@ -410,6 +412,13 @@ fn run_latency_delete_with_depth(iters: u64, histogram: &mut Histogram<u64>) -> 
 
             // Phase 2: Measure cancellation latency for iters iterations
             for iter in 0..iters {
+                if iter > 0 {
+                    while !ready_prod.load(std::sync::atomic::Ordering::Acquire) {
+                        std::hint::spin_loop();
+                    }
+                }
+                ready_prod.store(false, std::sync::atomic::Ordering::Release);
+
                 let ts = UtcTimestamp::now().to_unix_ns();
                 loop {
                     if ts_tx.push(ts).is_ok() {
@@ -468,6 +477,7 @@ fn run_latency_delete_with_depth(iters: u64, histogram: &mut Histogram<u64>) -> 
 
             let latency = UtcTimestamp::now().to_unix_ns().saturating_sub(send_ts);
             histogram.record(latency).unwrap();
+            ready.store(true, std::sync::atomic::Ordering::Release);
         }
 
         shutdown.store(true, std::sync::atomic::Ordering::Release);
@@ -480,12 +490,13 @@ fn run_latency_delete_with_depth(iters: u64, histogram: &mut Histogram<u64>) -> 
 
 /// Measures cancellation latency on a single deep price level.
 /// Builds many orders at the same price, then repeatedly cancels a middle order
-/// so the `VecDeque` scan/remove path is exercised.
+/// so the deep-price cancel path is exercised.
 fn run_latency_delete_same_price_depth(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
     const BOOK_SIZE: usize = 10_000;
     const SAME_PRICE: i64 = 123_456_000;
 
     let shutdown = Arc::new(AtomicBool::new(false));
+    let ready = Arc::new(AtomicBool::new(false));
     let producer_core = get_cores()[PRODUCER_CORE_OFFSET % get_cores().len()];
     let consumer_core = get_cores()[CONSUMER_CORE_OFFSET % get_cores().len()];
     let engine_core = get_cores()[ENGINE_CORE_OFFSET % get_cores().len()];
@@ -524,6 +535,7 @@ fn run_latency_delete_same_price_depth(iters: u64, histogram: &mut Histogram<u64
             let _ = engine.run();
         });
 
+        let ready_prod = Arc::clone(&ready);
         s.spawn(move || {
             core_affinity::set_for_current(producer_core);
 
@@ -533,7 +545,7 @@ fn run_latency_delete_same_price_depth(iters: u64, histogram: &mut Histogram<u64
             let mut next_order_id = OrderId::from_ascii("SAMEPRICE-ORDER-00001");
             let mut next_cancel_id = OrderId::from_ascii("SAMEPRICE-CANCEL-00001");
             let mut live_order_ids = Vec::with_capacity(BOOK_SIZE);
-            let mut live_order_indices = HashMap::with_capacity(BOOK_SIZE * 2);
+            let mut live_order_indices = AHashMap::with_capacity(BOOK_SIZE * 2);
 
             for _ in 0..BOOK_SIZE {
                 let current_order_id = next_order_id;
@@ -557,7 +569,14 @@ fn run_latency_delete_same_price_depth(iters: u64, histogram: &mut Histogram<u64
                 }
             }
 
-            for _ in 0..iters {
+            for iter in 0..iters {
+                if iter > 0 {
+                    while !ready_prod.load(std::sync::atomic::Ordering::Acquire) {
+                        std::hint::spin_loop();
+                    }
+                }
+                ready_prod.store(false, std::sync::atomic::Ordering::Release);
+
                 let index = live_order_ids.len() / 2;
                 let order_to_cancel = live_order_ids.swap_remove(index);
                 live_order_indices.remove(&order_to_cancel);
@@ -643,6 +662,7 @@ fn run_latency_delete_same_price_depth(iters: u64, histogram: &mut Histogram<u64
 
             let latency = UtcTimestamp::now().to_unix_ns().saturating_sub(send_ts);
             histogram.record(latency).unwrap();
+            ready.store(true, std::sync::atomic::Ordering::Release);
 
             // Second ack is the replacement create that keeps the level deep.
             loop {

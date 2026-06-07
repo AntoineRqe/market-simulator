@@ -1,7 +1,7 @@
 #[path = "common.rs"]
 mod common;
 
-use std::collections::HashMap;
+use ahash::AHashMap;
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -21,7 +21,7 @@ fn main() {
     let mut next_cancel_id = OrderId::from_ascii("SAMEPRICE-CANCEL-0001");
 
     let mut live_order_ids = Vec::with_capacity(BOOK_DEPTH);
-    let mut live_order_indices = HashMap::with_capacity(BOOK_DEPTH * 2);
+    let mut live_order_indices = AHashMap::with_capacity(BOOK_DEPTH * 2);
     for _ in 0..BOOK_DEPTH {
         let current_order_id = next_order_id;
         next_order_id.increment();

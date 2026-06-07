@@ -101,7 +101,7 @@ This output shows that the time spent in kernel space is mostly due to page faul
 In order to analyze the time spent in user space, we can use the profiling tool `perf` + `cargo-flamegraph` to generate flamegraphs for the order creation and deletion scenarios. This will allow us to visualize the call stack and identify any performance bottlenecks in our code.
 
 ```bash
-sudo -E env CARGO_TARGET_DIR="$PWD/target-flame-vecdeque"   cargo flamegraph -p order-book   --no-default-features   --features PriceLevelVecDeque   --profile profiling   --test perf_order_creation   --output "$PWD/flamegraph-vecdeque.svg"   -- 1000000
+sudo -E env CARGO_TARGET_DIR="$PWD/target-flame-vecdeque"   cargo flamegraph -p order-book   --profile profiling   --test perf_order_creation   --output "$PWD/flamegraph-vecdeque.svg"   -- 1000000
 ```
 
 ![Flamegraph for order creation with VecDeque](./images/vecdeque-no-optim.png)
@@ -190,10 +190,10 @@ sudo perf diff delete.data depth.data
                +5.52%  perf_order_deletion_with_depth-5017784401422df1  [.] <std::hash::random::DefaultHasher as core::hash::Hasher>::write
      3.37%     -3.27%  libc.so.6                                        [.] clock_gettime@@GLIBC_2.17
      4.50%     +1.94%  [kernel.kallsyms]                                [k] clear_page_erms
-               +1.79%  perf_order_deletion_with_depth-5017784401422df1  [.] order_book::book::book_vecdeque::<impl order_book::book::OrderBook>::add_resting_order
+               +1.79%  perf_order_deletion_with_depth-5017784401422df1  [.] order_book::book::OrderBook::add_resting_order
      1.86%     +1.77%  libc.so.6                                        [.] __memmove_avx512_unaligned_erms
                +1.65%  perf_order_deletion_with_depth-5017784401422df1  [.] alloc::collections::btree::map::BTreeMap<K,V,A>::remove
-               +1.40%  perf_order_deletion_with_depth-5017784401422df1  [.] order_book::book::book_vecdeque::<impl order_book::book::OrderBook>::process_buy_limit_order
+               +1.40%  perf_order_deletion_with_depth-5017784401422df1  [.] order_book::book::OrderBook::process_buy_limit_order
                +1.27%  perf_order_deletion_with_depth-5017784401422df1  [.] hashbrown::map::HashMap<K,V,S,A>::insert
                +0.89%  perf_order_deletion_with_depth-5017784401422df1  [.] hashbrown::map::HashMap<K,V,S,A>::remove
                +0.77%  perf_order_deletion_with_depth-5017784401422df1  [.] alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut,K,V,alloc::collections::btr>
